@@ -82,6 +82,8 @@ NSString *const kMXNotificationCenterAllOtherRoomMessagesRuleID = @".m.rule.mess
         // Define condition checkers for default Matrix conditions
         eventMatchConditionChecker = [[MXPushRuleEventMatchConditionChecker alloc] init];
         [self setChecker:eventMatchConditionChecker forConditionKind:kMXPushRuleConditionStringEventMatch];
+        [self setChecker:eventMatchConditionChecker forConditionKind:@"event_property_is"];
+        [self setChecker:eventMatchConditionChecker forConditionKind:@"event_property_contains"];
 
         MXPushRuleDisplayNameCondtionChecker *displayNameCondtionChecker = [[MXPushRuleDisplayNameCondtionChecker alloc] initWithMatrixSession:mxSession currentUserDisplayName:nil];
         [self setChecker:displayNameCondtionChecker forConditionKind:kMXPushRuleConditionStringContainsDisplayName];
@@ -168,6 +170,11 @@ NSString *const kMXNotificationCenterAllOtherRoomMessagesRuleID = @".m.rule.mess
             // Check rules one by one according to their priorities
             for (MXPushRule *rule in flatRules)
             {
+                // Intentional mentions replace only the legacy mention rules, not user keywords.
+                BOOL legacyMention = [rule.ruleId isEqualToString:@".m.rule.contains_display_name"]
+                    || [rule.ruleId isEqualToString:@".m.rule.contains_user_name"]
+                    || [rule.ruleId isEqualToString:@".m.rule.roomnotif"];
+                if (event.content[@"m.mentions"] && legacyMention) { continue; }
                 // Skip disabled rules
                 if (!rule.enabled)
                 {
@@ -176,7 +183,10 @@ NSString *const kMXNotificationCenterAllOtherRoomMessagesRuleID = @".m.rule.mess
                 
                 if (!JSONDictionary)
                 {
-                    JSONDictionary = event.JSONDictionary;
+                    NSMutableDictionary *decrypted = [event.JSONDictionary mutableCopy];
+                    if (event.content) { decrypted[@"content"] = event.content; }
+                    if (event.type) { decrypted[@"type"] = event.type; }
+                    JSONDictionary = decrypted;
                 }
                 
                 BOOL conditionsOk = YES;

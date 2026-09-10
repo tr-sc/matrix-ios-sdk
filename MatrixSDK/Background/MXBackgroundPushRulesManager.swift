@@ -42,9 +42,7 @@ import Foundation
                 }
             }
             
-            // vector-im/element-ios/issues/7636
-            // Intentionally disable new backend push rules as they're not handle properly and break notification sounds
-            flatRules = tmpRules.filter { $0.ruleId != ".m.rule.is_user_mention" && $0.ruleId != ".m.rule.is_room_mention" }
+            flatRules = tmpRules
         }
     }
     private var flatRules: [MXPushRule] = []
@@ -119,6 +117,8 @@ import Foundation
         
         let conditionCheckers: [MXPushRuleConditionType: MXPushRuleConditionChecker] = [
             .eventMatch: eventMatchConditionChecker,
+            .custom("event_property_is"): eventMatchConditionChecker,
+            .custom("event_property_contains"): eventMatchConditionChecker,
             .containsDisplayName: displayNameChecker,
             .roomMemberCount: memberCountConditionChecker,
             .senderNotificationPermission: permissionConditionChecker
@@ -127,7 +127,9 @@ import Foundation
         let eventDictionary = (event.clear ?? event).jsonDictionary()
         let equivalentCondition = MXPushRuleCondition()
         
+        let legacyMentions: Set<String> = [".m.rule.contains_display_name", ".m.rule.contains_user_name", ".m.rule.roomnotif"]
         for rule in flatRules.filter({ $0.enabled }) {
+            if event.content?["m.mentions"] != nil, legacyMentions.contains(rule.ruleId) { continue }
             var conditionsOk: Bool = true
             var runEquivalent: Bool = false
             
@@ -139,7 +141,7 @@ import Foundation
             case .override, .underride:
                 conditionsOk = true
                 
-                for condition in rule.conditions {
+                for condition in rule.conditions ?? [] {
                     guard let condition = condition as? MXPushRuleCondition else { continue }
                     let conditionType = MXPushRuleConditionType(identifier: condition.kind)
                     if let checker = conditionCheckers[conditionType] {
@@ -153,6 +155,7 @@ import Foundation
                         }
                     } else {
                         conditionsOk = false
+                        break
                     }
                 }
             case .content:
