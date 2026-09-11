@@ -15,8 +15,77 @@
 //
 
 import XCTest
+import Testing
 
 @testable import MatrixSDK
+
+struct MXRoomListDataSnapshotTests {
+    @Test func reorderedRoomsAreDifferent() {
+        let first = MockRoomSummary(withRoomId: "!first:example.org")
+        let second = MockRoomSummary(withRoomId: "!second:example.org")
+
+        #expect(data([first, second]) != data([second, first]))
+    }
+
+    @Test func sendingMessageChangesSnapshotEvenWhenRoomOrderIsUnchanged() throws {
+        let room = try #require(MXRoomSummary(roomId: "!room:example.org", andMatrixSession: nil))
+        room.updateLastMessage(try message(id: "$old", timestamp: 1_000))
+        let before = data([room])
+        let previousHash = before.hash
+
+        room.updateLastMessage(try message(id: "$new", timestamp: 2_000))
+        let after = data([room])
+
+        #expect(before != after)
+        #expect(before.hash == previousHash)
+    }
+
+    @Test func timestampChangeIsDetectedForSameEvent() throws {
+        let room = try #require(MXRoomSummary(roomId: "!room:example.org", andMatrixSession: nil))
+        room.updateLastMessage(try message(id: "$event", timestamp: 1_000))
+        let before = data([room])
+        room.updateLastMessage(try message(id: "$event", timestamp: 2_000))
+
+        #expect(before != data([room]))
+    }
+
+    @Test func unchangedRoomsRemainEqual() {
+        let room = MockRoomSummary(withRoomId: "!room:example.org")
+        let first = data([room])
+        let second = data([room])
+
+        #expect(first == second)
+        #expect(first.hash == second.hash)
+    }
+
+    @Test func unpaginatedCountsChangesAreDetected() {
+        let room = MockRoomSummary(withRoomId: "!room:example.org")
+        let before = data([room])
+        room.notificationCount = 1
+
+        #expect(before != data([room]))
+    }
+
+    private func data(_ rooms: [MXRoomSummaryProtocol]) -> MXRoomListData {
+        MXRoomListData(
+            rooms: rooms,
+            counts: MXStoreRoomListDataCounts(withRooms: rooms, total: nil),
+            paginationOptions: .none
+        )
+    }
+
+    private func message(id: String, timestamp: UInt64) throws -> MXRoomLastMessage {
+        let event = try #require(MXEvent(fromJSON: [
+            "event_id": id,
+            "room_id": "!room:example.org",
+            "sender": "@sender:example.org",
+            "origin_server_ts": timestamp,
+            "type": "m.room.message",
+            "content": ["msgtype": "m.text", "body": "Hello"]
+        ]))
+        return MXRoomLastMessage(event: event)
+    }
+}
 
 class MXStoreRoomListDataManagerUnitTests: XCTestCase {
     
