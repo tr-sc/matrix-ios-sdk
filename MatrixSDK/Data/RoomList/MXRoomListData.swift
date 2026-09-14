@@ -25,6 +25,40 @@ open class MXRoomListData: NSObject {
     public let paginationOptions: MXRoomListDataPaginationOptions
     /// Counts on the data
     public let counts: MXRoomListDataCounts
+
+    // Summaries are mutable and shared with previously published lists. Capture
+    // comparison values now, before a local echo or sync updates those objects.
+    // Array equality also preserves order, unlike the former XOR of room hashes.
+    private let roomSnapshots: [RoomSnapshot]
+    private let countsSnapshot: CountsSnapshot
+    private let totalCountsSnapshot: CountsSnapshot?
+
+    private struct RoomSnapshot: Hashable {
+        let roomId: String
+        let summaryHash: Int
+        let lastMessageTimestamp: UInt64?
+        let favoriteTagOrder: String?
+    }
+
+    private struct CountsSnapshot: Hashable {
+        let rooms: Int
+        let unsentRooms: Int
+        let notifiedRooms: Int
+        let highlightedRooms: Int
+        let notifications: UInt
+        let highlights: UInt
+        let invitedRooms: Int
+
+        init(_ counts: MXRoomListDataCounts) {
+            rooms = counts.numberOfRooms
+            unsentRooms = counts.numberOfUnsentRooms
+            notifiedRooms = counts.numberOfNotifiedRooms
+            highlightedRooms = counts.numberOfHighlightedRooms
+            notifications = counts.numberOfNotifications
+            highlights = counts.numberOfHighlights
+            invitedRooms = counts.numberOfInvitedRooms
+        }
+    }
     
     /// Current page. Zero-based. 0 if pagination disabled
     public var currentPage: Int {
@@ -61,6 +95,14 @@ open class MXRoomListData: NSObject {
         self.rooms = rooms
         self.counts = counts
         self.paginationOptions = paginationOptions
+        self.roomSnapshots = rooms.map {
+            RoomSnapshot(roomId: $0.roomId,
+                         summaryHash: $0.hash,
+                         lastMessageTimestamp: $0.lastMessage?.originServerTs,
+                         favoriteTagOrder: $0.favoriteTagOrder)
+        }
+        self.countsSnapshot = CountsSnapshot(counts)
+        self.totalCountsSnapshot = counts.total.map(CountsSnapshot.init)
         super.init()
     }
     
@@ -68,26 +110,18 @@ open class MXRoomListData: NSObject {
         guard let object = object as? MXRoomListData else {
             return false
         }
-        return self.hash == object.hash
+        return paginationOptions == object.paginationOptions
+            && roomSnapshots == object.roomSnapshots
+            && countsSnapshot == object.countsSnapshot
+            && totalCountsSnapshot == object.totalCountsSnapshot
     }
     
     public override var hash: Int {
-        let prime: Int64 = 1
-        var result: Int64 = 1
-        
-        let roomsHash = rooms.reduce(1, { $0 ^ $1.hash }).hashValue
-        result = prime * result + Int64(roomsHash)
-        result = prime * result + Int64(paginationOptions.rawValue)
-        if let total = counts.total {
-            result = prime * result + Int64(total.numberOfRooms)
-            result = prime * result + Int64(total.numberOfUnsentRooms)
-            result = prime * result + Int64(total.numberOfNotifiedRooms)
-            result = prime * result + Int64(total.numberOfHighlightedRooms)
-            result = prime * result + Int64(total.numberOfNotifications)
-            result = prime * result + Int64(total.numberOfHighlights)
-            result = prime * result + Int64(total.numberOfInvitedRooms)
-        }
-        
-        return String(result).hash
+        var hasher = Hasher()
+        hasher.combine(paginationOptions.rawValue)
+        hasher.combine(roomSnapshots)
+        hasher.combine(countsSnapshot)
+        hasher.combine(totalCountsSnapshot)
+        return hasher.finalize()
     }
 }
