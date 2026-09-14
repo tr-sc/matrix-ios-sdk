@@ -183,7 +183,7 @@ public class MXCoreDataRoomSummaryStore: NSObject {
     private func saveSummary(_ summary: MXRoomSummaryProtocol) {
         let moc = backgroundMoc
         
-        moc.performAndWait { [weak self] in
+        moc.perform { [weak self] in
             guard let self = self else { return }
             if let existing = self.fetchSummaryMO(forRoomId: summary.roomId, in: moc) {
                 existing.update(withRoomSummary: summary, in: moc)
@@ -203,7 +203,7 @@ public class MXCoreDataRoomSummaryStore: NSObject {
     private func deleteSummary(forRoomId roomId: String) {
         let moc = backgroundMoc
         
-        moc.performAndWait { [weak self] in
+        moc.perform { [weak self] in
             guard let self = self else { return }
             if let existing = self.fetchSummaryMO(forRoomId: roomId, in: moc) {
                 moc.delete(existing)
@@ -253,7 +253,10 @@ public class MXCoreDataRoomSummaryStore: NSObject {
                     completion(mapped)
                 }
             } catch {
-                MXLog.error("[MXCoreDataRoomSummaryStore] fetchRoomIds failed", context: error)
+                MXLog.error("[MXCoreDataRoomSummaryStore] fetchAllSummaries failed", context: error)
+                DispatchQueue.main.async {
+                    completion([])
+                }
             }
         }
     }
@@ -302,9 +305,23 @@ extension MXCoreDataRoomSummaryStore: MXRoomSummaryStore {
     }
     
     public func summary(ofRoom roomId: String) -> MXRoomSummaryProtocol? {
-        return fetchSummary(forRoomId: roomId, in: mainMoc)
+        return fetchSummary(forRoomId: roomId, in: persistentMoc)
     }
-    
+
+    public func allSummariesSync() -> [MXRoomSummaryProtocol] {
+        let moc = backgroundMoc
+        var result: [MXRoomSummaryProtocol] = []
+        moc.performAndWait {
+            let request = MXRoomSummaryMO.typedFetchRequest()
+            do {
+                result = try moc.fetch(request).compactMap { MXRoomSummary(summaryModel: $0) }
+            } catch {
+                MXLog.error("[MXCoreDataRoomSummaryStore] allSummariesSync failed", context: error)
+            }
+        }
+        return result
+    }
+
     public func removeSummary(ofRoom roomId: String) {
         deleteSummary(forRoomId: roomId)
     }

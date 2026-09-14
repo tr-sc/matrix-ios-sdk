@@ -135,6 +135,17 @@
     return NO;
 }
 
+- (void)removeExpiredMessagesWithRoomMinimumTimestamps:(NSDictionary<NSString *,NSNumber *> *)roomMinimumTimestamps
+                                            completion:(void (^)(NSUInteger, NSUInteger, BOOL))completion
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (completion)
+        {
+            completion(0, 0, NO);
+        }
+    });
+}
+
 - (MXEvent *)eventWithEventId:(NSString *)eventId inRoom:(NSString *)roomId
 {
     // Events are not stored. So, we cannot find it.
@@ -243,7 +254,7 @@
 - (id<MXEventsEnumerator>)messagesEnumeratorForRoom:(NSString *)roomId
 {
     // As the back pagination is based on the HS back pagination API, reset data about it
-    [self storePaginationTokenOfRoom:roomId andToken:@"END"];
+    [paginationTokens removeObjectForKey:roomId];
     [self storeHasReachedHomeServerPaginationEndForRoom:roomId andValue:NO];
 
     // [MXStore messagesEnumeratorForRoom:] is used for pagination but the goal

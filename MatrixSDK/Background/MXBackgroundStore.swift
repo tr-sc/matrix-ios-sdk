@@ -307,6 +307,15 @@ class MXBackgroundStore: NSObject, MXStore {
         // Not sure if this needs to be implemented
         false
     }
+
+    func removeExpiredMessages(
+        withRoomMinimumTimestamps roomMinimumTimestamps: [String: NSNumber],
+        completion: ((UInt, UInt, Bool) -> Void)? = nil
+    ) {
+        DispatchQueue.main.async {
+            completion?(0, 0, false)
+        }
+    }
 }
 
 //  MARK: - MXRoomSummaryStore
@@ -329,7 +338,11 @@ extension MXBackgroundStore: MXRoomSummaryStore {
     func summary(ofRoom roomId: String) -> MXRoomSummaryProtocol? {
         return fileStore.roomSummaryStore.summary(ofRoom: roomId)
     }
-    
+
+    func allSummariesSync() -> [MXRoomSummaryProtocol] {
+        return fileStore.roomSummaryStore.allSummariesSync()
+    }
+
     func removeSummary(ofRoom roomId: String) {
         
     }

@@ -101,8 +101,10 @@ static NSUInteger preloadOptions;
     // when it will read rooms states.
     NSMutableDictionary<NSString*, NSArray*> *preloadedRoomsStates;
 
-    // Same kind of cache for room account data.
-    NSMutableDictionary<NSString*, MXRoomAccountData*> *preloadedRoomAccountData;
+    // Persistent cache for room account data. NSNull represents a room whose
+    // account data file was missing or could not be decoded. Access is guarded
+    // with @synchronized because reads may come from the main and store queues.
+    NSMutableDictionary<NSString*, id> *preloadedRoomAccountData;
 
     // File reading and writing operations are dispatched to a separated thread.
     // The queue invokes blocks serially in FIFO order.
@@ -112,6 +114,11 @@ static NSUInteger preloadOptions;
 
     // The number of commits being done
     NSUInteger pendingCommits;
+
+    // Completion blocks grouped by the commit pass that makes their data
+    // durable. Calls merged into the second pending pass append to its group
+    // instead of losing their completion.
+    NSMutableArray<NSMutableArray<void (^)(void)> *> *pendingCommitCompletions;
     
     NSDate *backgroundTaskStartDate;
 
@@ -121,6 +128,10 @@ static NSUInteger preloadOptions;
 
 // The commit to file store background task
 @property (nonatomic, strong) id<MXBackgroundTask> commitBackgroundTask;
+
+// A separate task is used so a retention expiration never interferes with a commit.
+@property (atomic) BOOL retentionCleanupCancelled;
+@property (nonatomic, strong) id<MXBackgroundTask> retentionCleanupBackgroundTask;
 
 @end
 
@@ -361,6 +372,151 @@ static NSUInteger preloadOptions;
     }
 }
 
+- (void)removeExpiredMessagesWithRoomMinimumTimestamps:(NSDictionary<NSString *,NSNumber *> *)roomMinimumTimestamps
+                                            completion:(void (^)(NSUInteger, NSUInteger, BOOL))completion
+{
+    if (roomMinimumTimestamps.count == 0)
+    {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion)
+            {
+                completion(0, 0, NO);
+            }
+        });
+        return;
+    }
+
+    self.retentionCleanupCancelled = NO;
+    MXWeakify(self);
+    id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
+    self.retentionCleanupBackgroundTask = [handler startBackgroundTaskWithName:@"[MXFileStore] retention cleanup"
+                                                              expirationHandler:^{
+        MXStrongifyAndReturnIfNil(self);
+        self.retentionCleanupCancelled = YES;
+    }];
+
+    dispatch_block_t cleanupBlock = dispatch_block_create_with_qos_class(0, QOS_CLASS_UTILITY, 0, ^{
+        MXStrongifyAndReturnIfNil(self);
+        NSUInteger cleanedRoomCount = 0;
+        NSUInteger failedRoomCount = 0;
+        BOOL cancelled = NO;
+
+        for (NSString *roomId in roomMinimumTimestamps)
+        {
+            if (self.retentionCleanupCancelled)
+            {
+                cancelled = YES;
+                break;
+            }
+
+            // Loaded rooms are owned by the live RoomDataSource retention path.
+            // In particular, do not turn this batch into a preload of every room.
+            @synchronized (self->roomStores)
+            {
+                if (self->roomStores[roomId])
+                {
+                    continue;
+                }
+            }
+
+            NSString *roomFile = [self messagesFileForRoom:roomId forBackup:NO];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:roomFile])
+            {
+                continue;
+            }
+
+            @autoreleasepool
+            {
+                MXFileRoomStore *roomStore = nil;
+                @try
+                {
+                    roomStore = [NSKeyedUnarchiver unarchiveObjectWithFile:roomFile];
+                }
+                @catch (NSException *exception)
+                {
+                    MXLogWarning(@"[MXFileStore] Retention skipped corrupted room file %@: %@", roomId, exception.reason);
+                }
+
+                if (!roomStore)
+                {
+                    failedRoomCount++;
+                    continue;
+                }
+
+                uint64_t minimumTimestamp = roomMinimumTimestamps[roomId].unsignedLongLongValue;
+                if (![roomStore removeAllMessagesSentBefore:minimumTimestamp])
+                {
+                    continue;
+                }
+
+                NSError *archiveError = nil;
+                NSData *data = [NSKeyedArchiver archivedDataWithRootObject:roomStore
+                                                     requiringSecureCoding:NO
+                                                                     error:&archiveError];
+                if (!data)
+                {
+                    failedRoomCount++;
+                    MXLogFailureDetails(@"[MXFileStore] Failed archiving retention-cleaned room", archiveError);
+                    continue;
+                }
+
+                // Loading a room and producing this archive happen at different
+                // moments. Keep the second check and the atomic replacement under
+                // the same lock used by getOrCreateRoomStore: so this stale snapshot
+                // can never overwrite events committed by a newly mounted room.
+                BOOL roomBecameLoaded = NO;
+                BOOL writeSucceeded = NO;
+                NSError *writeError = nil;
+                @synchronized (self->roomStores)
+                {
+                    if (self->roomStores[roomId])
+                    {
+                        roomBecameLoaded = YES;
+                    }
+                    else if (self.retentionCleanupCancelled)
+                    {
+                        cancelled = YES;
+                    }
+                    else
+                    {
+                        writeSucceeded = [data writeToFile:roomFile
+                                                   options:NSDataWritingAtomic
+                                                     error:&writeError];
+                    }
+                }
+
+                if (roomBecameLoaded)
+                {
+                    continue;
+                }
+                if (cancelled)
+                {
+                    break;
+                }
+                if (writeSucceeded)
+                {
+                    cleanedRoomCount++;
+                }
+                else
+                {
+                    failedRoomCount++;
+                    MXLogFailureDetails(@"[MXFileStore] Failed atomically saving retention-cleaned room", writeError);
+                }
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.retentionCleanupBackgroundTask stop];
+            self.retentionCleanupBackgroundTask = nil;
+            if (completion)
+            {
+                completion(cleanedRoomCount, failedRoomCount, cancelled);
+            }
+        });
+    });
+    dispatch_async(dispatchQueue, cleanupBlock);
+}
+
 - (void)deleteAllMessagesInRoom:(NSString *)roomId
 {
     [super deleteAllMessagesInRoom:roomId];
@@ -385,6 +541,10 @@ static NSUInteger preloadOptions;
     [roomsToCommitForState removeObjectForKey:roomId];
     [roomSummaryStore removeSummaryOfRoom:roomId];
     [roomsToCommitForAccountData removeObjectForKey:roomId];
+    @synchronized (preloadedRoomAccountData)
+    {
+        [preloadedRoomAccountData removeObjectForKey:roomId];
+    }
     [roomsToCommitForReceipts removeObject:roomId];
 }
 
@@ -419,6 +579,10 @@ static NSUInteger preloadOptions;
     // Reset data
     metaData = nil;
     [roomStores removeAllObjects];
+    @synchronized (preloadedRoomAccountData)
+    {
+        [preloadedRoomAccountData removeAllObjects];
+    }
     self.eventStreamToken = nil;
 }
 
@@ -600,31 +764,55 @@ static NSUInteger preloadOptions;
 - (void)storeAccountDataForRoom:(NSString *)roomId userData:(MXRoomAccountData *)accountData
 {
     roomsToCommitForAccountData[roomId] = accountData;
+    @synchronized (preloadedRoomAccountData)
+    {
+        preloadedRoomAccountData[roomId] = accountData;
+    }
+}
+
+- (MXRoomAccountData *)loadAccountDataFromFileForRoom:(NSString *)roomId
+{
+    if (NSThread.isMainThread)
+    {
+        MXLogWarning(@"[MXFileStore] Loading account data for room %@ on the main thread", roomId);
+    }
+
+    MXRoomAccountData *roomUserData;
+    @try
+    {
+        roomUserData = [NSKeyedUnarchiver unarchiveObjectWithFile:[self accountDataFileForRoom:roomId forBackup:NO]];
+    }
+    @catch (NSException *exception)
+    {
+        NSDictionary *details = @{
+            @"room_id": roomId ?: @"unknown",
+            @"exception": exception ?: @"unknown"
+        };
+        MXLogErrorDetails(@"[MXFileStore] Failed to decode room account data", details);
+    }
+    return roomUserData;
 }
 
 - (MXRoomAccountData *)accountDataOfRoom:(NSString *)roomId
 {
-    // First, try to get the data from the cache
-    MXRoomAccountData *roomUserdData = preloadedRoomAccountData[roomId];
-
-    if (!roomUserdData)
+    id cachedAccountData;
+    @synchronized (preloadedRoomAccountData)
     {
-        roomUserdData =[NSKeyedUnarchiver unarchiveObjectWithFile:[self accountDataFileForRoom:roomId forBackup:NO]];
-
-        if (NO == [NSThread isMainThread])
-        {
-            // If this method is called from the `dispatchQueue` thread, it means MXFileStore is preloading
-            // data. So, fill the cache.
-            preloadedRoomAccountData[roomId] = roomUserdData;
-        }
-    }
-    else
-    {
-        // The cache information is valid only once
-        [preloadedRoomAccountData removeObjectForKey:roomId];
+        cachedAccountData = preloadedRoomAccountData[roomId];
     }
 
-    return roomUserdData;
+    if (cachedAccountData)
+    {
+        return cachedAccountData == NSNull.null ? nil : cachedAccountData;
+    }
+
+    MXRoomAccountData *roomUserData = [self loadAccountDataFromFileForRoom:roomId];
+    @synchronized (preloadedRoomAccountData)
+    {
+        preloadedRoomAccountData[roomId] = roomUserData ?: NSNull.null;
+    }
+
+    return roomUserData;
 }
 
 - (void)storeUser:(MXUser *)user
@@ -773,15 +961,30 @@ static NSUInteger preloadOptions;
     // Save data only if metaData exists
     if (metaData)
     {
+        if (!pendingCommitCompletions)
+        {
+            pendingCommitCompletions = [NSMutableArray array];
+        }
+
         // If there are already 2 pending commits, if the data is not stored during the 1st commit operation,
         // we are sure that it will be done on the second pass.
         if (pendingCommits >= 2)
         {
             MXLogDebug(@"[MXFileStore commit] Ignore it. There are already pending commits");
+            if (completion)
+            {
+                [pendingCommitCompletions.lastObject addObject:[completion copy]];
+            }
             return;
         }
 
         pendingCommits++;
+        NSMutableArray<void (^)(void)> *completions = [NSMutableArray array];
+        if (completion)
+        {
+            [completions addObject:[completion copy]];
+        }
+        [pendingCommitCompletions addObject:completions];
 
         MXWeakify(self);
 
@@ -824,6 +1027,11 @@ static NSUInteger preloadOptions;
                 MXLogDebug(@"[MXFileStore commit] lasted %.0fms", [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
 
                 self->pendingCommits--;
+                NSArray<void (^)(void)> *completions = self->pendingCommitCompletions.firstObject.copy;
+                if (self->pendingCommitCompletions.count)
+                {
+                    [self->pendingCommitCompletions removeObjectAtIndex:0];
+                }
                 
                 if (self.commitBackgroundTask.isRunning && self->pendingCommits == 0)
                 {
@@ -835,12 +1043,16 @@ static NSUInteger preloadOptions;
                     MXLogDebug(@"[MXFileStore commit] Background task %@ is kept - running since %.0fms", self.commitBackgroundTask, [[NSDate date] timeIntervalSinceDate:self->backgroundTaskStartDate] * 1000);
                 }
                 
-                if (completion)
+                for (void (^completion)(void) in completions)
                 {
                     completion();
                 }
             });
         });
+    }
+    else if (completion)
+    {
+        dispatch_async(dispatch_get_main_queue(), completion);
     }
 }
 
@@ -1016,10 +1228,15 @@ static NSUInteger preloadOptions;
 
 -(void)saveUnreadRooms
 {
-    
+    // Snapshot mutable state on the caller queue, then serialize the expensive
+    // archive and file write with the rest of the commit operations. The final
+    // commit cleanup is enqueued after saveDataToFiles returns, so completion
+    // ordering remains unchanged.
     NSArray<NSString*>* rooms = [roomUnreaded allObjects];
     NSString *roomsFile = [self unreadRoomsFile];
-    [self saveObject:rooms toFile:roomsFile];
+    dispatch_async(dispatchQueue, ^(void){
+        [self saveObject:rooms toFile:roomsFile];
+    });
 }
 
 -(void)loadUnreadRooms
@@ -1561,7 +1778,7 @@ static NSUInteger preloadOptions;
 
     for (NSString *roomId in roomIDs)
     {
-        preloadedRoomAccountData[roomId] = [self accountDataOfRoom:roomId];
+        [self accountDataOfRoom:roomId];
     }
 
     MXLogDebug(@"[MXFileStore] Loaded rooms account data of %tu rooms in %.0fms", roomIDs.count, [[NSDate date] timeIntervalSinceDate:startDate] * 1000);

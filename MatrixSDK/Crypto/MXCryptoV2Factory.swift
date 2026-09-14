@@ -27,12 +27,37 @@ import Foundation
 }
 
 @objc public class MXCryptoV2Factory: NSObject {
+    typealias MachineBuilder = (
+        _ userId: String,
+        _ deviceId: String,
+        _ restClient: MXRestClient,
+        _ getRoomAction: @escaping GetRoomAction
+    ) throws -> MXCryptoMachine
+
     enum Error: Swift.Error {
         case cryptoNotAvailable
     }
     
     @objc public static let shared = MXCryptoV2Factory()
     private let log = MXNamedLog(name: "MXCryptoV2Factory")
+    private let machineBuilder: MachineBuilder
+
+    private override init() {
+        machineBuilder = { userId, deviceId, restClient, getRoomAction in
+            try MXCryptoMachine(
+                userId: userId,
+                deviceId: deviceId,
+                restClient: restClient,
+                getRoomAction: getRoomAction
+            )
+        }
+        super.init()
+    }
+
+    init(machineBuilder: @escaping MachineBuilder) {
+        self.machineBuilder = machineBuilder
+        super.init()
+    }
     
     private var lastDeprecatedVersion: MXCryptoVersion {
         .deprecated3
@@ -74,11 +99,20 @@ import Foundation
         log.debug("Building crypto module")
         Task.detached { [weak self] in
             guard let self = self else { return }
+
+            let getRoomAction: GetRoomAction = { [weak session] in
+                session?.room(withRoomId: $0)
+            }
             
             do {
-                let crypto = try await MXCryptoV2(
-                    userId: userId,
-                    deviceId: deviceId,
+                // Opening the Rust store performs a 500k-round KDF. Build the
+                // machine before crossing to MXCryptoV2's MainActor initializer.
+                let machine = try self.machineBuilder(userId,
+                                                      deviceId,
+                                                      restClient,
+                                                      getRoomAction)
+                let crypto = await MXCryptoV2(
+                    machine: machine,
                     session: session,
                     restClient: restClient
                 )
@@ -86,9 +120,36 @@ import Foundation
                     success(crypto)
                 }
             } catch {
-                self.log.failure("Cannot create crypto", context: error)
-                await MainActor.run {
-                    failure(error)
+                // TRSC self-heal: an orphaned or unreadable crypto store used to
+                // hard-fail here (fatalError in debug). Typical trigger: the app was
+                // reinstalled — the App Group store file survived the uninstall but
+                // its pickle key in the keychain did not, so the rust store cannot
+                // be opened ("OpenStore: Failed to open the store"). Delete the
+                // broken store and retry ONCE from scratch: the device gets fresh
+                // crypto identity and room keys are recovered from the server-side
+                // key backup (TrscKeyBackupBootstrap) afterwards.
+                self.log.error("Cannot create crypto — deleting store and retrying once", context: error)
+                do {
+                    if let storeURL = try? MXCryptoMachineStore.storeURL(for: userId) {
+                        try? FileManager.default.removeItem(at: storeURL)
+                    }
+                    let machine = try self.machineBuilder(userId,
+                                                          deviceId,
+                                                          restClient,
+                                                          getRoomAction)
+                    let crypto = await MXCryptoV2(
+                        machine: machine,
+                        session: session,
+                        restClient: restClient
+                    )
+                    await MainActor.run {
+                        success(crypto)
+                    }
+                } catch {
+                    self.log.failure("Cannot create crypto", context: error)
+                    await MainActor.run {
+                        failure(error)
+                    }
                 }
             }
         }
