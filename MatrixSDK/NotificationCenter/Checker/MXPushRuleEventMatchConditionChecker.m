@@ -26,6 +26,23 @@
 
 - (BOOL)isCondition:(MXPushRuleCondition*)condition satisfiedBy:(MXEvent*)event roomState:(MXRoomState*)roomState withJsonDict:(NSDictionary*)contentAsJsonDict
 {
+    if ([condition.kind isEqualToString:@"event_property_is"] || [condition.kind isEqualToString:@"event_property_contains"])
+    {
+        NSString *key = condition.parameters[@"key"];
+        id expected = condition.parameters[@"value"];
+        if (![key isKindOfClass:NSString.class] || !expected) { return NO; }
+        id value = [self propertyAtPath:key inDictionary:contentAsJsonDict];
+        if ([condition.kind isEqualToString:@"event_property_is"])
+        {
+            return [self scalar:value equals:expected];
+        }
+        if (![value isKindOfClass:NSArray.class]) { return NO; }
+        for (id item in value)
+        {
+            if ([self scalar:item equals:expected]) { return YES; }
+        }
+        return NO;
+    }
     BOOL isSatisfied = NO;
     
     NSString *key = (NSString *)condition.parameters[@"key"];
@@ -38,7 +55,7 @@
     }
     
     // Otherwise retrieve the value from the original JSON.
-    NSObject *value = [contentAsJsonDict valueForKeyPath:key];
+    NSObject *value = [self propertyAtPath:key inDictionary:contentAsJsonDict];
     
     if (value && [value isKindOfClass:[NSString class]])
     {
@@ -78,6 +95,53 @@
     }
 
     return isSatisfied;
+}
+
+// Matrix property paths escape literal dots/backslashes; KVC is not a JSON path parser.
+- (id)propertyAtPath:(NSString *)path inDictionary:(NSDictionary *)dictionary
+{
+    if (![path isKindOfClass:NSString.class] || !path.length) { return nil; }
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    NSMutableString *part = [NSMutableString string];
+    BOOL escaped = NO;
+    for (NSUInteger index = 0; index < path.length; index++)
+    {
+        unichar character = [path characterAtIndex:index];
+        if (escaped)
+        {
+            if (character != '.' && character != '\\') { [part appendString:@"\\"]; }
+            [part appendFormat:@"%C", character];
+            escaped = NO;
+        }
+        else if (character == '\\') { escaped = YES; }
+        else if (character == '.') { [parts addObject:part.copy]; [part setString:@""]; }
+        else { [part appendFormat:@"%C", character]; }
+    }
+    if (escaped) { [part appendString:@"\\"]; }
+    [parts addObject:part];
+    id value = dictionary;
+    for (NSString *component in parts)
+    {
+        if (![value isKindOfClass:NSDictionary.class]) { return nil; }
+        value = value[component];
+    }
+    return value;
+}
+
+- (BOOL)scalar:(id)value equals:(id)expected
+{
+    if (!value || !expected) { return NO; }
+    if ([value isKindOfClass:NSString.class] && [expected isKindOfClass:NSString.class])
+    {
+        return [value isEqualToString:expected];
+    }
+    if ([value isKindOfClass:NSNumber.class] && [expected isKindOfClass:NSNumber.class])
+    {
+        BOOL valueIsBool = CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
+        BOOL expectedIsBool = CFGetTypeID((__bridge CFTypeRef)expected) == CFBooleanGetTypeID();
+        return valueIsBool == expectedIsBool && [value isEqualToNumber:expected];
+    }
+    return value == NSNull.null && expected == NSNull.null;
 }
 
 - (NSString*)globToRegex:(NSString*)glob
