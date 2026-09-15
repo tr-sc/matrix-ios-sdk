@@ -28,6 +28,7 @@
 
 @property (nonatomic) NSString *userId;
 @property (nonatomic) MXRealmAggregationsMapper *mapper;
+@property (nonatomic, strong, nullable) RLMRealm *mainThreadRealm;
 
 @end
 
@@ -238,12 +239,25 @@
 
 - (nullable RLMRealm*)realm
 {
-    NSError *error;
+    BOOL isMainThread = [NSThread isMainThread];
+
+    if (isMainThread && self.mainThreadRealm)
+    {
+        return self.mainThreadRealm;
+    }
+
+    NSError *error = nil;
+
     RLMRealm *realm = [RLMRealm realmWithConfiguration:self.realmConfiguration error:&error];
 
     if (error)
     {
         MXLogDebug(@"[MXRealmFileProvider] realmForUser gets error: %@", error);
+    }
+
+    if (isMainThread && realm)
+    {
+        self.mainThreadRealm = realm;
     }
 
     return realm;
