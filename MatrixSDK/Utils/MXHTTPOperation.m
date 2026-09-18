@@ -82,7 +82,7 @@
     _operation = operation.operation;
     creationDate = operation->creationDate;
     _numberOfTries = operation.numberOfTries;
-    _maxNumberOfTries = operation.maxRetriesTime;
+    _maxNumberOfTries = operation.maxNumberOfTries;
     _maxRetriesTime = operation.maxRetriesTime;
     _httpResponse = operation.httpResponse;
 
@@ -91,6 +91,8 @@
     if (_canceled)
     {
         [operation cancel];
+        _maxNumberOfTries = 0;
+        _maxRetriesTime = 0;
     }
 }
 
