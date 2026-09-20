@@ -83,6 +83,10 @@ typedef void (^MXOnRoomEvent)(MXEvent *event, MXTimelineDirection direction, MXR
  */
 @property (nonatomic, nullable, copy) MXRoomEventFilter *roomEventFilter;
 
+/** Optional HTTP attempt limit for pagination on this timeline. Nil preserves
+ the transport default. Set before pagination; copies inherit the value. */
+@property (nonatomic, nullable, copy) NSNumber *paginationMaxNumberOfTries;
+
 /**
  The state of the room at the top most recent event of the timeline.
  */

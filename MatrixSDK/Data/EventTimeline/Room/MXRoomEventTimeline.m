@@ -81,6 +81,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 @synthesize isLiveTimeline = _isLiveTimeline;
 @synthesize state = _state;
 @synthesize roomEventFilter = _roomEventFilter;
+@synthesize paginationMaxNumberOfTries = _paginationMaxNumberOfTries;
 
 #pragma mark - Initialisation
 
@@ -472,6 +473,10 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             // Disable retry to let the caller handle messages from store without delay.
             // The caller will trigger a new pagination if need.
             operation2.maxNumberOfTries = 1;
+        }
+        if (self.paginationMaxNumberOfTries)
+        {
+            operation2.maxNumberOfTries = MIN(operation2.maxNumberOfTries, self.paginationMaxNumberOfTries.unsignedIntegerValue);
         }
         
         [operation mutateTo:operation2];
@@ -1073,6 +1078,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     MXRoomEventTimeline *timeline = [[[self class] allocWithZone:zone] init];
     timeline->_initialEventId = _initialEventId;
     timeline->_roomEventFilter = _roomEventFilter;
+    timeline->_paginationMaxNumberOfTries = _paginationMaxNumberOfTries;
     timeline->_state = [_state copyWithZone:zone];
     timeline->room = room;
     timeline->store = store;
