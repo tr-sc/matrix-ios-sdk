@@ -40,6 +40,7 @@
     MXHTTPOperation *chainedOperation;
     dispatch_block_t cancellationHandler;
     dispatch_block_t retryCancellation;
+    dispatch_block_t completionHandler;
     BOOL httpComplete;
 }
 @property (nonatomic, strong) NSError *lastHTTPError;
@@ -162,6 +163,7 @@
 - (BOOL)completeHTTPRequest
 {
     dispatch_block_t cleanup;
+    dispatch_block_t completed;
     @synchronized (self)
     {
         if (httpComplete) return NO;
@@ -169,10 +171,24 @@
         cancellationHandler = nil;
         cleanup = retryCancellation;
         retryCancellation = nil;
+        completed = completionHandler;
+        completionHandler = nil;
         _operation = nil;
     }
     if (cleanup) cleanup();
+    if (completed) completed();
     return YES;
+}
+
+- (void)setHTTPCompletionHandler:(dispatch_block_t)handler
+{
+    BOOL finished;
+    @synchronized (self)
+    {
+        finished = httpComplete;
+        if (!finished) completionHandler = [handler copy];
+    }
+    if (finished && handler) handler();
 }
 
 - (BOOL)isHTTPRequestComplete { @synchronized (self) { return httpComplete; } }

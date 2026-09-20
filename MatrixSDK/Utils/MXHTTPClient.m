@@ -62,6 +62,51 @@ static NSError *MXHTTPCancelledError(void)
 @implementation MXHTTPRetryAction
 @end
 
+// Main-queue owned. Queued entries wait their turn. The active entry owns that
+// turn until the logical request completes, including delays and token refresh.
+// Its resume block is nil while running, non-nil if it loses connectivity again.
+@interface MXHTTPReachabilityEntry : NSObject
+@property (nonatomic, weak) MXHTTPOperation *operation;
+@property (nonatomic, copy) dispatch_block_t resume;
+@end
+@implementation MXHTTPReachabilityEntry
+@end
+
+// Either provider callback must keep a request alive even when the caller
+// discards its cancellation handle. The operation's cancellation handler is
+// weak in the opposite direction; terminal completion releases user captures.
+@interface MXHTTPRequestContext : NSObject
+@property (nonatomic, strong) MXHTTPOperation *operation;
+@property (nonatomic, copy) void (^success)(NSDictionary *);
+@property (nonatomic, copy) void (^failure)(NSError *);
+- (void)finishWithResponse:(NSDictionary *)response error:(NSError *)error failed:(BOOL)failed;
+@end
+@implementation MXHTTPRequestContext
+- (void)finishWithResponse:(NSDictionary *)response error:(NSError *)error failed:(BOOL)failed
+{
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self finishWithResponse:response error:error failed:failed]; });
+        return;
+    }
+    // All terminal delivery is main-queue serialized; cancel's flag is protected
+    // by MXHTTPOperation. Clear ownership before reentrant user/queue callbacks.
+    MXHTTPOperation *operation = self.operation;
+    if (!operation) return;
+    void (^success)(NSDictionary *) = self.success;
+    void (^failure)(NSError *) = self.failure;
+    self.operation = nil;
+    self.success = nil;
+    self.failure = nil;
+    if (![operation completeHTTPRequest]) return;
+    if (operation.isCancelled) {
+        error = MXHTTPCancelledError();
+        failed = YES;
+    }
+    if (failed) {
+        if (failure) failure(error);
+    } else if (success) success(response);
+}
+@end
 
 @interface MXHTTPClient ()
 {
@@ -78,7 +123,8 @@ static NSError *MXHTTPCancelledError(void)
     /**
      The list of blocks managing request retries once network is back
      */
-    NSMutableArray *reachabilityObservers;
+    NSMutableArray<MXHTTPReachabilityEntry *> *reachabilityObservers;
+    MXHTTPReachabilityEntry *activeReachabilityEntry;
 
     /**
      Unrecognized Certificate handler
@@ -237,26 +283,28 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
     // Only these wrappers deliver terminal callbacks. Token refresh and retries
     // share the same operation; late callbacks after cancellation are harmless.
     __weak MXHTTPOperation *weakOperation = mxHTTPOperation;
-    void (^originalSuccess)(NSDictionary *) = success;
-    void (^originalFailure)(NSError *) = failure;
-    success = ^(NSDictionary *response) {
+    __weak MXHTTPClient *weakClient = self;
+    [mxHTTPOperation setHTTPCompletionHandler:^{
         MXHTTPOperation *operation = weakOperation;
-        if (![operation completeHTTPRequest]) return;
-        if (operation.isCancelled) {
-            if (originalFailure) originalFailure(MXHTTPCancelledError());
-        } else if (originalSuccess) originalSuccess(response);
+        if (NSThread.isMainThread) [weakClient finishReachabilityForOperation:operation];
+        else dispatch_async(dispatch_get_main_queue(), ^{ [weakClient finishReachabilityForOperation:operation]; });
+    }];
+    MXHTTPRequestContext *context = [MXHTTPRequestContext new];
+    context.operation = mxHTTPOperation;
+    context.success = success;
+    context.failure = failure;
+    success = ^(NSDictionary *response) {
+        [context finishWithResponse:response error:nil failed:NO];
     };
     failure = ^(NSError *error) {
-        MXHTTPOperation *operation = weakOperation;
-        if (![operation completeHTTPRequest]) return;
-        if (originalFailure) originalFailure(operation.isCancelled ? MXHTTPCancelledError() : error);
+        [context finishWithResponse:nil error:error failed:YES];
     };
+    __weak MXHTTPRequestContext *weakContext = context;
     [mxHTTPOperation setHTTPCancellationHandler:^{
-        MXHTTPOperation *operation = weakOperation;
-        // AFHTTPSessionManager uses the main queue for this client's callbacks.
-        // Retain the cancelled operation until its terminal callback is delivered.
+        // Retain the context only for delivery, not from the operation itself.
+        MXHTTPRequestContext *context = weakContext;
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (operation) failure(MXHTTPCancelledError());
+            [context finishWithResponse:nil error:MXHTTPCancelledError() failed:YES];
         });
     }];
     
@@ -595,54 +643,37 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
                 }
                 else
                 {
-                    __block NSError *lastError = error;
+                    __block BOOL waitingForNetwork = YES;
+                    NSError *lastError = error;
 
                     // The device is not connected to the internet, wait for the connection to be up again before retrying
                     MXWeakify(self);
-                    id networkComeBackObserver = [self addObserverForNetworkComeBack:^{
+                    [self waitForNetworkForOperation:mxHTTPOperation resume:^{
                         MXStrongifyAndReturnIfNil(self);
 
                         if (mxHTTPOperation.isCancelled || mxHTTPOperation.isHTTPRequestComplete) {
-                            [self wakeUpNextReachabilityServer];
+                            if (!mxHTTPOperation.isHTTPRequestComplete) failure(MXHTTPCancelledError());
                             return;
                         }
 
                         MXLogDebug(@"[MXHTTPClient] Network is back for request %p", mxHTTPOperation);
 
                         // Flag this request as retried
-                        lastError = nil;
+                        waitingForNetwork = NO;
+                        [mxHTTPOperation setHTTPRetryCancellation:nil];
 
                         // Check whether the pending operation was not cancelled.
                         if (mxHTTPOperation.maxNumberOfTries)
                         {
                             MXLogDebug(@"[MXHTTPClient] Retry request %p. Try #%tu/%tu. Age: %tums. Max retries time: %tums", mxHTTPOperation, mxHTTPOperation.numberOfTries + 1, mxHTTPOperation.maxNumberOfTries, mxHTTPOperation.age, mxHTTPOperation.maxRetriesTime);
 
-                            MXWeakify(self);
-                            [self tryRequest:mxHTTPOperation method:httpMethod path:path parameters:parameters data:data headers:headers accessToken: accessToken timeout:timeoutInSeconds uploadProgress:uploadProgress success:^(NSDictionary *JSONResponse) {
-                                MXStrongifyAndReturnIfNil(self);
-
-                                MXLogDebug(@"[MXHTTPClient] Request %p finally succeeded after %tu tries and %tums", mxHTTPOperation, mxHTTPOperation.numberOfTries, mxHTTPOperation.age);
-
-                                success(JSONResponse);
-
-                                // The request is complete, managed the next one
-                                [self wakeUpNextReachabilityServer];
-
-                            } failure:^(NSError *error) {
-                                MXStrongifyAndReturnIfNil(self);
-                                
-                                failure(error);
-
-                                // The request is complete, managed the next one
-                                [self wakeUpNextReachabilityServer];
-                            }];
+                            [self tryRequest:mxHTTPOperation method:httpMethod path:path parameters:parameters data:data headers:headers accessToken:accessToken timeout:timeoutInSeconds uploadProgress:uploadProgress success:success failure:failure];
                         }
                         else
                         {
                             MXLogDebug(@"[MXHTTPClient] The request %p has been cancelled", mxHTTPOperation);
 
-                            // The request is complete, managed the next one
-                            [self wakeUpNextReachabilityServer];
+                            failure(lastError);
                         }
                     }];
 
@@ -653,18 +684,14 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
                         if (mxHTTPOperation.isCancelled || mxHTTPOperation.isHTTPRequestComplete) return;
 
                         // If the request has not been retried yet, consider we are in error
-                        if (lastError)
+                        if (waitingForNetwork)
                         {
                             MXLogDebug(@"[MXHTTPClient] Give up retry for request %p. Time expired.", mxHTTPOperation);
 
-                            [self removeObserverForNetworkComeBack:networkComeBackObserver];
                             failure(lastError);
                         }
                     }];
-                    [mxHTTPOperation setHTTPRetryCancellation:^{
-                        if (cancelTimer) cancelTimer();
-                        [weakself removeObserverForNetworkComeBack:networkComeBackObserver];
-                    }];
+                    [mxHTTPOperation setHTTPRetryCancellation:cancelTimer];
                 }
                 error = nil;
             }
@@ -885,7 +912,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
     reachabilityObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AFNetworkingReachabilityDidChangeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
         MXStrongifyAndReturnIfNil(self);
 
-        if ([self isNetworkReachable] && self->reachabilityObservers.count)
+        if ([self isNetworkReachable])
         {
             // Start retrying request one by one to keep messages order
             MXLogDebug(@"[MXHTTPClient] Network is back. Wake up %tu observers.", self->reachabilityObservers.count);
@@ -896,28 +923,44 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
 
 - (void)wakeUpNextReachabilityServer
 {
-    if ([self isNetworkReachable])
-    {
-        void(^onNetworkComeBackBlock)(void) = [reachabilityObservers firstObject];
-        if (onNetworkComeBackBlock)
-        {
-            [reachabilityObservers removeObject:onNetworkComeBackBlock];
-            onNetworkComeBackBlock();
-        }
+    NSAssert(NSThread.isMainThread, @"Reachability entries are main-queue owned");
+    if (![self isNetworkReachable]) return;
+    if (!activeReachabilityEntry) {
+        activeReachabilityEntry = reachabilityObservers.firstObject;
+        if (activeReachabilityEntry) [reachabilityObservers removeObjectAtIndex:0];
     }
+    dispatch_block_t resume = activeReachabilityEntry.resume;
+    activeReachabilityEntry.resume = nil;
+    if (resume) resume();
 }
 
-- (id)addObserverForNetworkComeBack:(void (^)(void))onNetworkComeBackBlock
+- (void)waitForNetworkForOperation:(MXHTTPOperation *)operation resume:(dispatch_block_t)resume
 {
-    id block = [onNetworkComeBackBlock copy];
-    [reachabilityObservers addObject:block];
-
-    return block;
+    NSAssert(NSThread.isMainThread, @"Reachability entries are main-queue owned");
+    // A retry that loses connectivity again keeps its place, ahead of waiters.
+    MXHTTPReachabilityEntry *entry = activeReachabilityEntry;
+    if (entry.operation != operation) {
+        entry = [MXHTTPReachabilityEntry new];
+        entry.operation = operation;
+        [reachabilityObservers addObject:entry];
+    }
+    entry.resume = resume;
 }
 
-- (void)removeObserverForNetworkComeBack:(id)observer
+- (void)finishReachabilityForOperation:(MXHTTPOperation *)operation
 {
-    [reachabilityObservers removeObject:observer];
+    NSAssert(NSThread.isMainThread, @"Reachability entries are main-queue owned");
+    if (!operation) return;
+    if (activeReachabilityEntry.operation == operation) {
+        activeReachabilityEntry.resume = nil;
+        activeReachabilityEntry = nil;
+        [self wakeUpNextReachabilityServer];
+    } else {
+        NSIndexSet *indexes = [reachabilityObservers indexesOfObjectsPassingTest:^BOOL(MXHTTPReachabilityEntry *entry, NSUInteger index, BOOL *stop) {
+            return entry.operation == operation;
+        }];
+        [reachabilityObservers removeObjectsAtIndexes:indexes];
+    }
 }
 
 - (void)setUpSSLCertificatesHandler

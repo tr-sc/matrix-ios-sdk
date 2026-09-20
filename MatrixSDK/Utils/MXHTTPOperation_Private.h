@@ -6,6 +6,8 @@
 @interface MXHTTPOperation (HTTPClient)
 - (void)setHTTPCancellationHandler:(dispatch_block_t)handler;
 - (void)setHTTPRetryCancellation:(dispatch_block_t)cancellation;
+// Logical-request cleanup, independent of replaceable per-attempt retry timers.
+- (void)setHTTPCompletionHandler:(dispatch_block_t)handler;
 - (BOOL)completeHTTPRequest;
 - (BOOL)isHTTPRequestComplete;
 - (BOOL)hasRemainingHTTPAttempts;
