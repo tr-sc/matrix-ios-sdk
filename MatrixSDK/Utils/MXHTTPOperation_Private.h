@@ -8,6 +8,8 @@
 - (void)setHTTPRetryCancellation:(dispatch_block_t)cancellation;
 - (BOOL)completeHTTPRequest;
 - (BOOL)isHTTPRequestComplete;
+- (BOOL)hasRemainingHTTPAttempts;
+@property (nonatomic, strong) NSError *lastHTTPError;
 // Atomically install/resume a suspended task, or cancel it if cancellation won.
 - (void)resumeHTTPTask:(NSURLSessionDataTask *)task;
 @end

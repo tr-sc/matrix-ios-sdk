@@ -290,6 +290,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
             MXStrongifyAndReturnIfNil(self);
             // Check if we received an invalid token response.
             if (error
+                && mxHTTPOperation.hasRemainingHTTPAttempts
                 && self.tokenValidationResponseHandler(error)
                 && self.tokenProviderHandler)
             {
@@ -301,6 +302,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
                     MXStrongifyAndReturnIfNil(self);
                     if (mxHTTPOperation.isHTTPRequestComplete) return;
                     if (mxHTTPOperation.isCancelled) { failure(MXHTTPCancelledError()); return; }
+                    if (!mxHTTPOperation.hasRemainingHTTPAttempts) { failure(error); return; }
                     mxHTTPOperation.operation = nil;
                     // If was an invalid token response verify we can get a new one and retry the original request with new token.
                     MXWeakify(self);
@@ -349,6 +351,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
 {
     if (mxHTTPOperation.isHTTPRequestComplete) return;
     if (mxHTTPOperation.isCancelled) { failure(MXHTTPCancelledError()); return; }
+    if (!mxHTTPOperation.hasRemainingHTTPAttempts) { failure(mxHTTPOperation.lastHTTPError); return; }
     // Sanity check
     if (invalidatedSession)
     {
@@ -405,7 +408,6 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
         
     } downloadProgress:nil completionHandler:^(NSURLResponse * _Nonnull theResponse, NSDictionary *JSONResponse, NSError * _Nullable error) {
         NSHTTPURLResponse *response = (NSHTTPURLResponse*)theResponse;
-        mxHTTPOperation.httpResponse = response;
 
         MXLogDebug(@"[MXHTTPClient] #%@ - %@ %@ completed in %.0fms" ,@(requestNumber), httpMethod, path, [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
 
@@ -419,9 +421,13 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
         mxHTTPOperation.operation = nil;
 
         // Also clean up when a cancelled/finished request ignores a late result.
-        dispatch_async(dispatch_get_main_queue(), ^{ [self cleanupBackgroundTask]; });
-        if (mxHTTPOperation.isHTTPRequestComplete) return;
-        if (mxHTTPOperation.isCancelled) { failure(MXHTTPCancelledError()); return; }
+        if (mxHTTPOperation.isHTTPRequestComplete || mxHTTPOperation.isCancelled)
+        {
+            dispatch_async(dispatch_get_main_queue(), ^{ [self cleanupBackgroundTask]; });
+            if (!mxHTTPOperation.isHTTPRequestComplete) failure(MXHTTPCancelledError());
+            return;
+        }
+        mxHTTPOperation.httpResponse = response;
 
         if (!error)
         {
@@ -441,6 +447,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
         else
         {
             [MXHTTPClient logRequestFailure:mxHTTPOperation path:path statusCode:response.statusCode error:error];
+            mxHTTPOperation.lastHTTPError = error;
 
             if (response)
             {
@@ -456,6 +463,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
                         // Extract values from the home server JSON response
                         MXError *mxError = [self mxErrorFromJSON:JSONResponse];
                         mxError.httpResponse = response;
+                        mxHTTPOperation.lastHTTPError = [mxError createNSError];
 
                         // Send a notification
                         [[NSNotificationCenter defaultCenter] postNotificationName:kMXHTTPClientMatrixErrorNotification
@@ -467,7 +475,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
                             error = [mxError createNSError];
                             
                             // Wait and retry if we have not retried too much
-                            if (mxHTTPOperation.age < MXHTTPCLIENT_RATE_LIMIT_MAX_MS)
+                            if (mxHTTPOperation.hasRemainingHTTPAttempts && mxHTTPOperation.age < MXHTTPCLIENT_RATE_LIMIT_MAX_MS)
                             {
                                 NSString *retryAfterMsString = JSONResponse[@"retry_after_ms"];
                                 if (retryAfterMsString)
@@ -550,7 +558,8 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
                     }
                 }
             }
-            else if (mxHTTPOperation.numberOfTries < mxHTTPOperation.maxNumberOfTries
+            else if (mxHTTPOperation.hasRemainingHTTPAttempts
+                     && mxHTTPOperation.numberOfTries < mxHTTPOperation.maxNumberOfTries
                      && mxHTTPOperation.age < mxHTTPOperation.maxRetriesTime
                      && !([error.domain isEqualToString:NSURLErrorDomain]
                           && (error.code == kCFURLErrorCancelled                    // No need to retry a cancelation (which can also happen on SSL error)

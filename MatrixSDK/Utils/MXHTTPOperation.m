@@ -42,6 +42,7 @@
     dispatch_block_t retryCancellation;
     BOOL httpComplete;
 }
+@property (nonatomic, strong) NSError *lastHTTPError;
 @end
 
 
@@ -49,6 +50,19 @@
 
 @synthesize operation = _operation;
 @synthesize canceled = _canceled;
+@synthesize maxTotalAttempts = _maxTotalAttempts;
+@synthesize lastHTTPError = _lastHTTPError;
+
+- (NSNumber *)maxTotalAttempts { @synchronized (self) { return _maxTotalAttempts; } }
+- (void)setMaxTotalAttempts:(NSNumber *)limit
+{
+    NSParameterAssert(!limit || (limit.doubleValue >= 1 && limit.doubleValue == limit.unsignedIntegerValue));
+    @synchronized (self) { _maxTotalAttempts = [limit copy]; }
+}
+- (BOOL)hasRemainingHTTPAttempts
+{
+    @synchronized (self) { return !_maxTotalAttempts || _numberOfTries < _maxTotalAttempts.unsignedIntegerValue; }
+}
 
 - (instancetype)init
 {
@@ -194,6 +208,7 @@
             creationDate = operation->creationDate;
             _numberOfTries = operation.numberOfTries;
             _maxNumberOfTries = cancelled ? 0 : operation.maxNumberOfTries;
+            _maxTotalAttempts = operation.maxTotalAttempts;
             _maxRetriesTime = cancelled ? 0 : operation.maxRetriesTime;
             _httpResponse = cancelled ? nil : operation.httpResponse;
         }

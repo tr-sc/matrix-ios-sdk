@@ -50,6 +50,13 @@
 @property (nonatomic) NSUInteger maxNumberOfTries;
 
 /**
+ Optional strict limit on all HTTP task starts, including the initial attempt.
+ nil preserves legacy retry policies. Only positive integer values are valid.
+ Unlike maxNumberOfTries, this also bounds rate-limit and token-refresh retries.
+ */
+@property (nonatomic, copy, nullable) NSNumber *maxTotalAttempts;
+
+/**
  Time is milliseconds while a request can be retried.
  Default is 3 minutes.
  */

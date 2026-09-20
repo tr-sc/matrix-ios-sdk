@@ -477,6 +477,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         if (self.paginationMaxNumberOfTries)
         {
             operation2.maxNumberOfTries = MIN(operation2.maxNumberOfTries, self.paginationMaxNumberOfTries.unsignedIntegerValue);
+            operation2.maxTotalAttempts = self.paginationMaxNumberOfTries;
         }
         
         [operation mutateTo:operation2];
