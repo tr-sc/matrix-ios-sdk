@@ -49,6 +49,23 @@
 
 @end
 
+@interface MXLegacyOnlyMemoryStore : MXMemoryStore
+@end
+
+@implementation MXLegacyOnlyMemoryStore
+
+- (BOOL)respondsToSelector:(SEL)aSelector
+{
+    if (aSelector == @selector(storeBackwardPaginationStateForRoom:state:)
+        || aSelector == @selector(backwardPaginationStateForRoom:))
+    {
+        return NO;
+    }
+    return [super respondsToSelector:aSelector];
+}
+
+@end
+
 @interface MXBackwardPaginationTestSession : MXSession
 @property (nonatomic, strong) MXMemoryStore *testStore;
 @property (nonatomic, strong) MXRoomSummary *testSummary;
@@ -105,6 +122,7 @@ ifNewerThanTimestamp:(uint64_t)timestamp
 @property (nonatomic, strong, readonly) MXMemoryStore *store;
 @property (nonatomic, strong, readonly) MXRoom *room;
 @property (nonatomic, strong, readonly) MXSynchronousDecryptionRoomEventTimeline *timeline;
+- (instancetype)initWithStore:(MXMemoryStore *)store;
 - (void)respondWithEvents:(NSArray<MXEvent *> *)events end:(NSString *)end;
 - (void)failWithError:(NSError *)error;
 @end
@@ -112,6 +130,11 @@ ifNewerThanTimestamp:(uint64_t)timestamp
 @implementation MXBackwardPaginationFixture
 
 - (instancetype)init
+{
+    return [self initWithStore:[MXMemoryStore new]];
+}
+
+- (instancetype)initWithStore:(MXMemoryStore *)store
 {
     self = [super init];
     if (self)
@@ -124,7 +147,7 @@ ifNewerThanTimestamp:(uint64_t)timestamp
                        initWithCredentials:credentials
                        andOnUnrecognizedCertificateBlock:nil];
         _session = [[MXBackwardPaginationTestSession alloc] initWithMatrixRestClient:_restClient];
-        _store = [MXMemoryStore new];
+        _store = store;
         _session.testStore = _store;
         _session.testSummary = [[MXRoomSummary alloc] initWithRoomId:_roomId andMatrixSession:_session];
         _session.testSummary.membership = MXMembershipJoin;
@@ -188,7 +211,12 @@ ifNewerThanTimestamp:(uint64_t)timestamp
 
 - (MXBackwardPaginationFixture *)newFixture
 {
-    MXBackwardPaginationFixture *fixture = [MXBackwardPaginationFixture new];
+    return [self newFixtureWithStore:[MXMemoryStore new]];
+}
+
+- (MXBackwardPaginationFixture *)newFixtureWithStore:(MXMemoryStore *)store
+{
+    MXBackwardPaginationFixture *fixture = [[MXBackwardPaginationFixture alloc] initWithStore:store];
     [self addTeardownBlock:^{
         [fixture.session close];
     }];
@@ -296,6 +324,28 @@ ifNewerThanTimestamp:(uint64_t)timestamp
     XCTAssertEqualObjects(fixture.restClient.requestedFrom, @"cursor-0");
     [fixture respondWithEvents:@[] end:@"cursor-1"];
     XCTAssertTrue(paginationCompleted);
+}
+
+- (void)testLegacyOnlyStoreUsesBooleanFallbackForBackwardPaginationState
+{
+    MXLegacyOnlyMemoryStore *store = [MXLegacyOnlyMemoryStore new];
+    MXBackwardPaginationFixture *fixture = [self newFixtureWithStore:store];
+
+    [store storeHasReachedHomeServerPaginationEndForRoom:fixture.roomId andValue:NO];
+    XCTAssertTrue([fixture.timeline canPaginate:MXTimelineDirectionBackwards]);
+
+    [fixture.timeline paginate:30
+                     direction:MXTimelineDirectionBackwards
+                 onlyFromStore:NO
+                      complete:^{}
+                       failure:^(NSError *error) { XCTFail(@"Unexpected pagination error: %@", error); }];
+    [fixture respondWithEvents:@[] end:nil];
+
+    XCTAssertTrue([store hasReachedHomeServerPaginationEndForRoom:fixture.roomId]);
+    XCTAssertFalse([fixture.timeline canPaginate:MXTimelineDirectionBackwards]);
+
+    [store storeHasReachedHomeServerPaginationEndForRoom:fixture.roomId andValue:NO];
+    XCTAssertTrue([fixture.timeline canPaginate:MXTimelineDirectionBackwards]);
 }
 
 - (void)testSlidingSyncInitialWithCursorFillsMissingTokenAndBecomesAvailable

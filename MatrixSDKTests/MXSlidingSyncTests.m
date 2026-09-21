@@ -186,6 +186,7 @@
     [first setValue:[@{@"!a:example.org": @30, @"!b:example.org": @20} mutableCopy] forKey:@"slidingSyncBumpStamps"];
     [first setValue:@120 forKey:@"slidingSyncTotalRoomCount"];
     [first persistSlidingSyncState];
+    [first close];
 
     MXRestClient *restoredRestClient = [[MXRestClient alloc] initWithCredentials:credentials
                                              andOnUnrecognizedCertificateBlock:nil];
@@ -218,6 +219,7 @@
     }];
 
     [self waitForExpectationsWithTimeout:2 handler:nil];
+    [restored close];
     [NSUserDefaults.standardUserDefaults removeObjectForKey:persistenceKey];
 }
 
@@ -274,6 +276,7 @@
     }];
 
     [self waitForExpectationsWithTimeout:2 handler:nil];
+    [session close];
 }
 
 @end
