@@ -25,7 +25,6 @@
 #import "MXEventRelations.h"
 #import "MXRoomEventFilter.h"
 
-#import "MXError.h"
 #import "MXTools.h"
 
 #import "MXEventsEnumeratorOnArray.h"
@@ -72,6 +71,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     // history flush must invalidate pending pages on every copy as well.
     NSHashTable<MXHTTPOperation *> *paginationOperations;
 }
+
+- (MXRoomBackwardPaginationState)backwardPaginationState;
+- (void)setBackwardPaginationState:(MXRoomBackwardPaginationState)state reason:(NSString *)reason;
 @end
 
 @implementation MXRoomEventTimeline
@@ -195,6 +197,40 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
 
 #pragma mark - Pagination
+- (MXRoomBackwardPaginationState)backwardPaginationState
+{
+    if ([store respondsToSelector:@selector(backwardPaginationStateForRoom:)])
+    {
+        return [store backwardPaginationStateForRoom:_state.roomId];
+    }
+
+    return [store hasReachedHomeServerPaginationEndForRoom:_state.roomId]
+        ? MXRoomBackwardPaginationStateExhausted
+        : MXRoomBackwardPaginationStateUnknown;
+}
+
+- (void)setBackwardPaginationState:(MXRoomBackwardPaginationState)state reason:(NSString *)reason
+{
+    MXRoomBackwardPaginationState previousState = [self backwardPaginationState];
+    if (previousState == state)
+    {
+        return;
+    }
+
+    if ([store respondsToSelector:@selector(storeBackwardPaginationStateForRoom:state:)])
+    {
+        [store storeBackwardPaginationStateForRoom:_state.roomId state:state];
+    }
+    else
+    {
+        [store storeHasReachedHomeServerPaginationEndForRoom:_state.roomId
+                                                   andValue:state == MXRoomBackwardPaginationStateExhausted];
+    }
+
+    MXLogDebug(@"[MXRoomEventTimeline] backward pagination state changed for %@: %tu -> %tu (%@)",
+               _state.roomId, previousState, state, reason);
+}
+
 - (BOOL)canPaginate:(MXTimelineDirection)direction
 {
     BOOL canPaginate = NO;
@@ -205,7 +241,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         //  - did we end to paginate from the MXStore?
         //  - did we reach the top of the pagination in our requests to the home server?
         canPaginate = (0 < storeMessagesEnumerator.remaining)
-            || ![store hasReachedHomeServerPaginationEndForRoom:_state.roomId];
+            || [self backwardPaginationState] != MXRoomBackwardPaginationStateExhausted;
     }
     else
     {
@@ -374,7 +410,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                 return;
             }
 
-            if (remainingNumItems <= 0 || YES == [self->store hasReachedHomeServerPaginationEndForRoom:self.state.roomId])
+            if (remainingNumItems <= 0 || [self backwardPaginationState] == MXRoomBackwardPaginationStateExhausted)
             {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     // Nothing more to do
@@ -443,27 +479,6 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             MXStrongifyAndReturnIfNil(self);
             if (!shouldApply()) return;
 
-            // Check whether the pagination end is reached
-            MXError *mxError = [[MXError alloc] initWithNSError:error];
-            if (mxError && [mxError.error isEqualToString:kMXErrorStringInvalidToken])
-            {
-                // Store the fact we run out of items
-                if (direction == MXTimelineDirectionBackwards)
-                {
-                    [self->store storeHasReachedHomeServerPaginationEndForRoom:self->_state.roomId andValue:YES];
-                }
-                else
-                {
-                    self->hasReachedHomeServerForwardsPaginationEnd = YES;
-                }
-
-                MXLogDebug(@"[MXRoomEventTimeline] paginate: pagination end has been reached");
-
-                // Ignore the error
-                finish(nil);
-                return;
-            }
-
             MXLogDebug(@"[MXRoomEventTimeline] paginate failed");
             finish(error);
         }];
@@ -497,6 +512,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 {
     // Is it an initial sync for this room?
     BOOL isRoomInitialSync = (room.summary.membership == MXMembershipUnknown || room.summary.membership == MXMembershipInvite);
+    BOOL isSlidingSync = roomSync.slidingSyncInitial != nil;
+    BOOL isSlidingSyncInitial = roomSync.slidingSyncInitial.boolValue;
+    BOOL isPaginationInitialSync = isSlidingSync ? isSlidingSyncInitial : isRoomInitialSync;
 
     // Check whether the room was pending on an invitation.
     if (room.summary.membership == MXMembershipInvite)
@@ -567,16 +585,11 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                 [self addEvent:event direction:MXTimelineDirectionForwards fromStore:NO isRoomInitialSync:isRoomInitialSync];
             }
             
-            // Check whether we got all history from the home server
-            if (!roomSync.timeline.limited)
-            {
-                [self->store storeHasReachedHomeServerPaginationEndForRoom:self.state.roomId andValue:YES];
-            }
         }
         else
         {
             // Check whether some events have not been received from server.
-            if (roomSync.timeline.limited)
+            if (!isPaginationInitialSync && roomSync.timeline.limited)
             {
                 // Flush the existing messages for this room by keeping state events.
                 [self->store deleteAllMessagesInRoom:self.state.roomId];
@@ -589,10 +602,77 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             }
         }
         
-        // In case of limited timeline, update token where to start back pagination
-        if (roomSync.timeline.limited)
+        NSString *previousBatch = roomSync.timeline.prevBatch;
+        BOOL hasExplicitGap = roomSync.timeline.hasLimited && roomSync.timeline.limited;
+
+        if (isSlidingSync)
         {
-            [self->store storePaginationTokenOfRoom:self.state.roomId andToken:roomSync.timeline.prevBatch];
+            if (hasExplicitGap)
+            {
+                if (previousBatch)
+                {
+                    [self->store storePaginationTokenOfRoom:self.state.roomId andToken:previousBatch];
+                }
+                [self setBackwardPaginationState:(previousBatch
+                                                  ? MXRoomBackwardPaginationStateAvailable
+                                                  : MXRoomBackwardPaginationStateUnknown)
+                                           reason:@"sync_gap"];
+            }
+            else if (isPaginationInitialSync)
+            {
+                MXRoomBackwardPaginationState previousState = [self backwardPaginationState];
+                if (previousBatch && ![self->store paginationTokenOfRoom:self.state.roomId])
+                {
+                    [self->store storePaginationTokenOfRoom:self.state.roomId andToken:previousBatch];
+                }
+
+                // A Sliding Sync initial payload is a connection snapshot, not
+                // proof that older history no longer exists. Preserve an end
+                // established by /messages; otherwise keep one server probe.
+                if (previousState != MXRoomBackwardPaginationStateExhausted)
+                {
+                    [self setBackwardPaginationState:(previousBatch
+                                                      ? MXRoomBackwardPaginationStateAvailable
+                                                      : MXRoomBackwardPaginationStateUnknown)
+                                               reason:@"sliding_initial"];
+                }
+            }
+            else if ([self backwardPaginationState] == MXRoomBackwardPaginationStateUnknown
+                     && ![self->store paginationTokenOfRoom:self.state.roomId]
+                     && previousBatch)
+            {
+                [self->store storePaginationTokenOfRoom:self.state.roomId andToken:previousBatch];
+                [self setBackwardPaginationState:MXRoomBackwardPaginationStateAvailable
+                                           reason:@"sync_gap"];
+            }
+        }
+        else if (isPaginationInitialSync && roomSync.timeline.hasLimited)
+        {
+            if (roomSync.timeline.limited)
+            {
+                if (previousBatch)
+                {
+                    [self->store storePaginationTokenOfRoom:self.state.roomId andToken:previousBatch];
+                }
+                [self setBackwardPaginationState:(previousBatch
+                                                  ? MXRoomBackwardPaginationStateAvailable
+                                                  : MXRoomBackwardPaginationStateUnknown)
+                                           reason:@"sync_gap"];
+            }
+            else
+            {
+                [self setBackwardPaginationState:MXRoomBackwardPaginationStateExhausted
+                                           reason:@"legacy_initial_complete"];
+            }
+        }
+        else if (hasExplicitGap)
+        {
+            if (previousBatch)
+            {
+                [self->store storePaginationTokenOfRoom:self.state.roomId andToken:previousBatch];
+            }
+            [self setBackwardPaginationState:MXRoomBackwardPaginationStateAvailable
+                                       reason:@"sync_gap"];
         }
         
         // Finalize initial sync
@@ -607,7 +687,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                                                                   userInfo:nil];
             });
         }
-        else if (roomSync.timeline.limited)
+        else if (!isPaginationInitialSync && roomSync.timeline.limited)
         {
             // The room has been resync with a limited timeline - Post notification
             [[NSNotificationCenter defaultCenter] postNotificationName:kMXRoomDidFlushDataNotification
@@ -660,21 +740,6 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         MXStrongifyAndReturnIfNil(self);
         if (!shouldApply()) return;
 
-        // Check pagination end - @see SPEC-319 ticket
-        // End token might be ommited when end of the timeline is reached: https://github.com/matrix-org/synapse/pull/12903
-        if (paginatedResponse.chunk.count == 0 && (paginatedResponse.end == nil || [paginatedResponse.start isEqualToString:paginatedResponse.end]))
-        {
-            // Store the fact we run out of items
-            if (direction == MXTimelineDirectionBackwards)
-            {
-                [self->store storeHasReachedHomeServerPaginationEndForRoom:self->_state.roomId andValue:YES];
-            }
-            else
-            {
-                self->hasReachedHomeServerForwardsPaginationEnd = YES;
-            }
-        }
-
         // Process additional state events (this happens in case of lazy loading)
         if (paginatedResponse.state.count)
         {
@@ -710,15 +775,37 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             [self addEvent:event direction:direction fromStore:NO isRoomInitialSync:NO];
         }
         
-        // And update pagination tokens
+        // Update pagination state and tokens only after every event has been
+        // applied. A missing end token is authoritative even for non-empty
+        // chunks; an empty filtered page with a new cursor is not an end.
         if (!shouldApply()) return;
         if (direction == MXTimelineDirectionBackwards)
         {
-            [self->store storePaginationTokenOfRoom:self.state.roomId andToken:paginatedResponse.end];
+            if (!paginatedResponse.end)
+            {
+                [self setBackwardPaginationState:MXRoomBackwardPaginationStateExhausted
+                                           reason:@"messages_end_absent"];
+            }
+            else if ([paginatedResponse.start isEqualToString:paginatedResponse.end])
+            {
+                [self setBackwardPaginationState:MXRoomBackwardPaginationStateExhausted
+                                           reason:@"messages_no_progress"];
+            }
+            else
+            {
+                [self->store storePaginationTokenOfRoom:self.state.roomId andToken:paginatedResponse.end];
+                [self setBackwardPaginationState:MXRoomBackwardPaginationStateAvailable
+                                           reason:@"messages_end_present"];
+            }
         }
         else
         {
             self->forwardsPaginationToken = paginatedResponse.end;
+            if (paginatedResponse.chunk.count == 0
+                && (!paginatedResponse.end || [paginatedResponse.start isEqualToString:paginatedResponse.end]))
+            {
+                self->hasReachedHomeServerForwardsPaginationEnd = YES;
+            }
         }
         
         // Commit store changes

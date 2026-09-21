@@ -37,6 +37,19 @@
 @class MXAuthMetadata;
 
 /**
+ The state of backward pagination for a room.
+
+ `MXRoomBackwardPaginationStateUnknown` is intentionally the zero value so that
+ stores which have not learned the state yet keep allowing a homeserver request.
+ */
+typedef NS_ENUM(NSUInteger, MXRoomBackwardPaginationState)
+{
+    MXRoomBackwardPaginationStateUnknown = 0,
+    MXRoomBackwardPaginationStateAvailable,
+    MXRoomBackwardPaginationStateExhausted,
+};
+
+/**
  The `MXStore` protocol defines an interface that must be implemented in order to store
  Matrix data handled during a `MXSession`.
  */
@@ -142,6 +155,20 @@
 // @TODO(summary): Move to MXRoomSummary
 - (void)storeHasReachedHomeServerPaginationEndForRoom:(nonnull NSString*)roomId andValue:(BOOL)value;
 - (BOOL)hasReachedHomeServerPaginationEndForRoom:(nonnull NSString*)roomId;
+
+@optional
+
+/**
+ Store/retrieve the backward pagination state of a room.
+
+ This capability is optional to keep existing custom `MXStore`
+ implementations source compatible. Callers must fall back to
+ `hasReachedHomeServerPaginationEndForRoom:` when it is not implemented.
+ */
+- (void)storeBackwardPaginationStateForRoom:(nonnull NSString*)roomId state:(MXRoomBackwardPaginationState)state;
+- (MXRoomBackwardPaginationState)backwardPaginationStateForRoom:(nonnull NSString*)roomId;
+
+@required
 
 /**
  Store/retrieve the flag indicating that the SDK has retrieved all room members

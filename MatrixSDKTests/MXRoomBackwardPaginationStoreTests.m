@@ -1,0 +1,246 @@
+/*
+ Copyright 2026 The Matrix.org Foundation C.I.C
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+ http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
+
+#import <XCTest/XCTest.h>
+
+#import "MXFileRoomStore.h"
+#import "MXMemoryStore.h"
+#import "MXNoStore.h"
+
+static NSString *const kBackwardPaginationStateKey = @"backwardPaginationStateV1";
+static NSString *const kLegacyPaginationEndKey = @"hasReachedHomeServerPaginationEnd";
+
+@interface MXRoomStoreTestCoder : NSCoder
+
+@property (nonatomic, readonly) NSMutableDictionary<NSString *, id> *values;
+
+- (instancetype)initWithValues:(NSDictionary<NSString *, id> *)values;
+
+@end
+
+@implementation MXRoomStoreTestCoder
+
+- (instancetype)init
+{
+    return [self initWithValues:@{}];
+}
+
+- (instancetype)initWithValues:(NSDictionary<NSString *, id> *)values
+{
+    self = [super init];
+    if (self)
+    {
+        _values = [values mutableCopy];
+    }
+    return self;
+}
+
+- (BOOL)allowsKeyedCoding
+{
+    return YES;
+}
+
+- (BOOL)containsValueForKey:(NSString *)key
+{
+    return self.values[key] != nil;
+}
+
+- (id)decodeObjectForKey:(NSString *)key
+{
+    return self.values[key];
+}
+
+- (BOOL)decodeBoolForKey:(NSString *)key
+{
+    return [self.values[key] boolValue];
+}
+
+- (NSInteger)decodeIntegerForKey:(NSString *)key
+{
+    return [self.values[key] integerValue];
+}
+
+- (void)encodeObject:(id)object forKey:(NSString *)key
+{
+    if (object)
+    {
+        self.values[key] = object;
+    }
+}
+
+- (void)encodeBool:(BOOL)value forKey:(NSString *)key
+{
+    self.values[key] = @(value);
+}
+
+- (void)encodeInteger:(NSInteger)value forKey:(NSString *)key
+{
+    self.values[key] = @(value);
+}
+
+@end
+
+
+@interface MXRoomBackwardPaginationStoreTests : XCTestCase
+@end
+
+@implementation MXRoomBackwardPaginationStoreTests
+
+- (void)testNewMemoryStoreHasUnknownBackwardPaginationState
+{
+    MXMemoryStore *store = [MXMemoryStore new];
+
+    XCTAssertEqual([store backwardPaginationStateForRoom:@"!room:example.org"], MXRoomBackwardPaginationStateUnknown);
+    XCTAssertFalse([store hasReachedHomeServerPaginationEndForRoom:@"!room:example.org"]);
+}
+
+- (void)testAllStatesRoundTripThroughFileRoomStoreCoding
+{
+    NSArray<NSNumber *> *states = @[
+        @(MXRoomBackwardPaginationStateUnknown),
+        @(MXRoomBackwardPaginationStateAvailable),
+        @(MXRoomBackwardPaginationStateExhausted)
+    ];
+
+    for (NSNumber *stateValue in states)
+    {
+        MXFileRoomStore *source = [MXFileRoomStore new];
+        source.backwardPaginationState = (MXRoomBackwardPaginationState)stateValue.unsignedIntegerValue;
+
+        MXRoomStoreTestCoder *coder = [MXRoomStoreTestCoder new];
+        [source encodeWithCoder:coder];
+
+        MXFileRoomStore *decoded = [[MXFileRoomStore alloc] initWithCoder:coder];
+        XCTAssertEqual(decoded.backwardPaginationState, stateValue.unsignedIntegerValue);
+    }
+}
+
+- (void)testLegacyReachedEndMigratesToUnknownAndPreservesToken
+{
+    MXRoomStoreTestCoder *coder = [[MXRoomStoreTestCoder alloc] initWithValues:@{
+        kLegacyPaginationEndKey: @YES,
+        @"paginationToken": @"legacy-token"
+    }];
+
+    MXFileRoomStore *store = [[MXFileRoomStore alloc] initWithCoder:coder];
+
+    XCTAssertEqual(store.backwardPaginationState, MXRoomBackwardPaginationStateUnknown);
+    XCTAssertEqualObjects(store.paginationToken, @"legacy-token");
+}
+
+- (void)testLegacyNotReachedEndWithTokenMigratesToAvailable
+{
+    MXRoomStoreTestCoder *coder = [[MXRoomStoreTestCoder alloc] initWithValues:@{
+        kLegacyPaginationEndKey: @NO,
+        @"paginationToken": @"legacy-token"
+    }];
+
+    MXFileRoomStore *store = [[MXFileRoomStore alloc] initWithCoder:coder];
+
+    XCTAssertEqual(store.backwardPaginationState, MXRoomBackwardPaginationStateAvailable);
+}
+
+- (void)testLegacyNotReachedEndWithoutTokenMigratesToUnknown
+{
+    MXRoomStoreTestCoder *coder = [[MXRoomStoreTestCoder alloc] initWithValues:@{
+        kLegacyPaginationEndKey: @NO
+    }];
+
+    MXFileRoomStore *store = [[MXFileRoomStore alloc] initWithCoder:coder];
+
+    XCTAssertEqual(store.backwardPaginationState, MXRoomBackwardPaginationStateUnknown);
+}
+
+- (void)testInvalidPersistedStateMigratesToUnknown
+{
+    MXRoomStoreTestCoder *coder = [[MXRoomStoreTestCoder alloc] initWithValues:@{
+        kBackwardPaginationStateKey: @999
+    }];
+
+    MXFileRoomStore *store = [[MXFileRoomStore alloc] initWithCoder:coder];
+
+    XCTAssertEqual(store.backwardPaginationState, MXRoomBackwardPaginationStateUnknown);
+}
+
+- (void)testCodingDualWritesRollbackSafeLegacyValue
+{
+    NSDictionary<NSNumber *, NSNumber *> *legacyValuesByState = @{
+        @(MXRoomBackwardPaginationStateUnknown): @NO,
+        @(MXRoomBackwardPaginationStateAvailable): @NO,
+        @(MXRoomBackwardPaginationStateExhausted): @YES
+    };
+
+    [legacyValuesByState enumerateKeysAndObjectsUsingBlock:^(NSNumber *stateValue, NSNumber *legacyValue, BOOL *stop) {
+        MXFileRoomStore *store = [MXFileRoomStore new];
+        store.backwardPaginationState = (MXRoomBackwardPaginationState)stateValue.unsignedIntegerValue;
+        MXRoomStoreTestCoder *coder = [MXRoomStoreTestCoder new];
+
+        [store encodeWithCoder:coder];
+
+        XCTAssertEqualObjects(coder.values[kBackwardPaginationStateKey], stateValue);
+        XCTAssertEqualObjects(coder.values[kLegacyPaginationEndKey], legacyValue);
+    }];
+}
+
+- (void)testLegacyFacadeMapsOnlyYesToExhausted
+{
+    MXMemoryStore *store = [MXMemoryStore new];
+    NSString *roomId = @"!room:example.org";
+
+    [store storeHasReachedHomeServerPaginationEndForRoom:roomId andValue:YES];
+    XCTAssertEqual([store backwardPaginationStateForRoom:roomId], MXRoomBackwardPaginationStateExhausted);
+    XCTAssertTrue([store hasReachedHomeServerPaginationEndForRoom:roomId]);
+
+    [store storeHasReachedHomeServerPaginationEndForRoom:roomId andValue:NO];
+    XCTAssertEqual([store backwardPaginationStateForRoom:roomId], MXRoomBackwardPaginationStateUnknown);
+    XCTAssertFalse([store hasReachedHomeServerPaginationEndForRoom:roomId]);
+
+    [store storeBackwardPaginationStateForRoom:roomId state:MXRoomBackwardPaginationStateAvailable];
+    XCTAssertFalse([store hasReachedHomeServerPaginationEndForRoom:roomId]);
+}
+
+- (void)testDeleteAllMessagesResetsTokenAndState
+{
+    MXMemoryStore *store = [MXMemoryStore new];
+    NSString *roomId = @"!room:example.org";
+    [store storePaginationTokenOfRoom:roomId andToken:@"token"];
+    [store storeBackwardPaginationStateForRoom:roomId state:MXRoomBackwardPaginationStateExhausted];
+
+    [store deleteAllMessagesInRoom:roomId];
+
+    XCTAssertNil([store paginationTokenOfRoom:roomId]);
+    XCTAssertEqual([store backwardPaginationStateForRoom:roomId], MXRoomBackwardPaginationStateUnknown);
+}
+
+- (void)testNoStoreSupportsAllBackwardPaginationStates
+{
+    MXNoStore *store = [MXNoStore new];
+    NSString *roomId = @"!room:example.org";
+
+    XCTAssertEqual([store backwardPaginationStateForRoom:roomId], MXRoomBackwardPaginationStateUnknown);
+
+    [store storeBackwardPaginationStateForRoom:roomId state:MXRoomBackwardPaginationStateAvailable];
+    XCTAssertEqual([store backwardPaginationStateForRoom:roomId], MXRoomBackwardPaginationStateAvailable);
+    XCTAssertFalse([store hasReachedHomeServerPaginationEndForRoom:roomId]);
+
+    [store storeBackwardPaginationStateForRoom:roomId state:MXRoomBackwardPaginationStateExhausted];
+    XCTAssertTrue([store hasReachedHomeServerPaginationEndForRoom:roomId]);
+
+    [store deleteRoom:roomId];
+    XCTAssertEqual([store backwardPaginationStateForRoom:roomId], MXRoomBackwardPaginationStateUnknown);
+}
+
+@end

@@ -598,7 +598,13 @@ static NSUInteger preloadOptions;
 
 - (void)storeHasReachedHomeServerPaginationEndForRoom:(NSString *)roomId andValue:(BOOL)value
 {
-    [super storeHasReachedHomeServerPaginationEndForRoom:roomId andValue:value];
+    [self storeBackwardPaginationStateForRoom:roomId
+                                        state:value ? MXRoomBackwardPaginationStateExhausted : MXRoomBackwardPaginationStateUnknown];
+}
+
+- (void)storeBackwardPaginationStateForRoom:(NSString *)roomId state:(MXRoomBackwardPaginationState)state
+{
+    [super storeBackwardPaginationStateForRoom:roomId state:state];
 
     if (NSNotFound == [roomsToCommitForMessages indexOfObject:roomId])
     {

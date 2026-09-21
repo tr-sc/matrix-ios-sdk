@@ -36,6 +36,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL limited;
 
 /**
+ Whether the `limited` field was present in the source JSON.
+
+ Sliding Sync room payloads may omit this field.  In that case `limited`
+ remains `NO`, but must not be interpreted as an explicit `false` value.
+ */
+@property (nonatomic, readonly) BOOL hasLimited;
+
+/**
  If the batch was limited then this is a token that can be supplied to the server to retrieve more events
  */
 @property (nonatomic) NSString *prevBatch;

@@ -16,6 +16,19 @@
 
 @implementation MXSlidingSyncTests
 
+- (MXRoomSync *)legacyRoomFromSlidingRoom:(NSDictionary *)slidingRoom
+{
+    NSDictionary *json = @{
+        @"pos": @"99",
+        @"lists": @{},
+        @"rooms": @{@"!room:example.org": slidingRoom},
+        @"extensions": @{}
+    };
+    MXSlidingSyncResponse *response = [MXSlidingSyncResponse modelFromJSON:json];
+    MXSyncResponse *legacy = [response legacySyncResponseForUserId:@"@me:example.org"];
+    return legacy.rooms.join[@"!room:example.org"];
+}
+
 - (void)testDefaultRequestUsesFastInitialWindowAndRequiredState
 {
     MXSlidingSyncConfiguration *configuration = MXSlidingSyncConfiguration.defaultConfiguration;
@@ -67,9 +80,76 @@
     XCTAssertEqualObjects(response.position, @"99");
     XCTAssertEqual(response.lists[@"main"].count, 1u);
     XCTAssertEqual(room.timeline.events.count, 1u);
+    XCTAssertFalse(room.timeline.hasLimited);
+    XCTAssertFalse(room.timeline.limited);
+    XCTAssertNil(room.timeline.prevBatch);
+    XCTAssertEqualObjects(room.slidingSyncInitial, @YES);
+    XCTAssertNil(room.JSONDictionary[@"timeline"][@"limited"]);
+    XCTAssertNil(room.JSONDictionary[@"timeline"][@"prev_batch"]);
+    MXRoomSync *roundTrippedRoom = [MXRoomSync modelFromJSON:room.JSONDictionary];
+    XCTAssertFalse(roundTrippedRoom.timeline.hasLimited);
+    XCTAssertEqualObjects(roundTrippedRoom.slidingSyncInitial, @YES);
     XCTAssertEqual(room.unreadNotifications.notificationCount, 4u);
     XCTAssertEqual(room.unreadNotifications.highlightCount, 2u);
     XCTAssertEqualObjects(legacy.deviceOneTimeKeysCount[@"signed_curve25519"], @3);
+}
+
+- (void)testSlidingSyncPreservesExplicitLimitedFalse
+{
+    MXRoomSync *room = [self legacyRoomFromSlidingRoom:@{
+        @"membership": @"join",
+        @"initial": @YES,
+        @"limited": @NO,
+        @"timeline": @[]
+    }];
+
+    XCTAssertTrue(room.timeline.hasLimited);
+    XCTAssertFalse(room.timeline.limited);
+    XCTAssertEqualObjects(room.timeline.JSONDictionary[@"limited"], @NO);
+    XCTAssertEqualObjects(room.slidingSyncInitial, @YES);
+}
+
+- (void)testSlidingSyncPreservesLimitedTrueAndPreviousBatch
+{
+    MXRoomSync *room = [self legacyRoomFromSlidingRoom:@{
+        @"membership": @"join",
+        @"initial": @YES,
+        @"limited": @YES,
+        @"prev_batch": @"deep-token",
+        @"timeline": @[]
+    }];
+
+    XCTAssertTrue(room.timeline.hasLimited);
+    XCTAssertTrue(room.timeline.limited);
+    XCTAssertEqualObjects(room.timeline.prevBatch, @"deep-token");
+    XCTAssertEqualObjects(room.timeline.JSONDictionary[@"limited"], @YES);
+    XCTAssertEqualObjects(room.timeline.JSONDictionary[@"prev_batch"], @"deep-token");
+}
+
+- (void)testSlidingSyncIncrementalRoomHasExplicitProvenance
+{
+    MXRoomSync *room = [self legacyRoomFromSlidingRoom:@{
+        @"membership": @"join",
+        @"timeline": @[]
+    }];
+
+    XCTAssertEqualObjects(room.slidingSyncInitial, @NO);
+    XCTAssertFalse(room.timeline.hasLimited);
+}
+
+- (void)testLegacySyncLimitedFalseDoesNotHaveSlidingSyncProvenance
+{
+    MXRoomSync *room = [MXRoomSync modelFromJSON:@{
+        @"timeline": @{
+            @"events": @[],
+            @"limited": @NO
+        }
+    }];
+
+    XCTAssertNil(room.slidingSyncInitial);
+    XCTAssertTrue(room.timeline.hasLimited);
+    XCTAssertFalse(room.timeline.limited);
+    XCTAssertEqualObjects(room.timeline.JSONDictionary[@"limited"], @NO);
 }
 
 - (void)testParsesEveryClassicListOperationForCompatibleServers

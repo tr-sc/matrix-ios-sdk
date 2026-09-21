@@ -23,6 +23,8 @@
 #import "MXRoomSyncUnreadNotifications.h"
 #import "MXRoomSyncSummary.h"
 
+NSString * const MXRoomSyncSlidingSyncInitialJSONKey = @"org.matrix.sdk.sliding_sync.initial";
+
 @implementation MXRoomSync
 
 + (id)modelFromJSON:(NSDictionary *)JSONDictionary
@@ -52,6 +54,7 @@
             roomSync.unreadNotificationsPerThread = unreadNotificationsPerThread;
         }
         MXJSONModelSetMXJSONModel(roomSync.summary, MXRoomSyncSummary, JSONDictionary[@"summary"]);
+        MXJSONModelSetNumber(roomSync.slidingSyncInitial, JSONDictionary[MXRoomSyncSlidingSyncInitialJSONKey]);
     }
     return roomSync;
 }
@@ -66,6 +69,10 @@
     JSONDictionary[@"account_data"] = self.accountData.JSONDictionary;
     JSONDictionary[@"unread_notifications"] = self.unreadNotifications.JSONDictionary;
     JSONDictionary[@"summary"] = self.summary.JSONDictionary;
+    if (self.slidingSyncInitial)
+    {
+        JSONDictionary[MXRoomSyncSlidingSyncInitialJSONKey] = self.slidingSyncInitial;
+    }
     
     return JSONDictionary;
 }

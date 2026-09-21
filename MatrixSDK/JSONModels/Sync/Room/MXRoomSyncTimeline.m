@@ -18,7 +18,19 @@
 
 #import "MXEvent.h"
 
+@interface MXRoomSyncTimeline ()
+
+@property (nonatomic, readwrite) BOOL hasLimited;
+
+@end
+
 @implementation MXRoomSyncTimeline
+
+- (void)setLimited:(BOOL)limited
+{
+    _limited = limited;
+    _hasLimited = YES;
+}
 
 + (id)modelFromJSON:(NSDictionary *)JSONDictionary
 {
@@ -26,7 +38,7 @@
     if (roomSyncTimeline)
     {
         MXJSONModelSetMXJSONModelArray(roomSyncTimeline.events, MXEvent, JSONDictionary[@"events"]);
-        MXJSONModelSetBoolean(roomSyncTimeline.limited , JSONDictionary[@"limited"]);
+        MXJSONModelSetBoolean(roomSyncTimeline.limited, JSONDictionary[@"limited"]);
         MXJSONModelSetString(roomSyncTimeline.prevBatch, JSONDictionary[@"prev_batch"]);
     }
     return roomSyncTimeline;
@@ -42,8 +54,14 @@
         [jsonEvents addObject:event.JSONDictionary];
     }
     JSONDictionary[@"events"] = jsonEvents;
-    JSONDictionary[@"limited"] = @(self.limited);
-    JSONDictionary[@"prev_batch"] = self.prevBatch;
+    if (self.hasLimited)
+    {
+        JSONDictionary[@"limited"] = @(self.limited);
+    }
+    if (self.prevBatch)
+    {
+        JSONDictionary[@"prev_batch"] = self.prevBatch;
+    }
     
     return JSONDictionary;
 }

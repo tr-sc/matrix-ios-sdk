@@ -258,6 +258,8 @@
 		32549AF923F2E2790002576B /* MXKeyVerificationReady.h in Headers */ = {isa = PBXBuildFile; fileRef = 32549AF623F2E2790002576B /* MXKeyVerificationReady.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		32549AFA23F2E2790002576B /* MXKeyVerificationReady.h in Headers */ = {isa = PBXBuildFile; fileRef = 32549AF623F2E2790002576B /* MXKeyVerificationReady.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		325653831A2E14ED00CC0423 /* MXStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 325653821A2E14ED00CC0423 /* MXStoreTests.m */; };
+		A42602010000000000000002 /* MXRoomBackwardPaginationStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A42602010000000000000001 /* MXRoomBackwardPaginationStoreTests.m */; };
+		A42602010000000000000005 /* MXBackwardPaginationStateTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A42602010000000000000004 /* MXBackwardPaginationStateTests.m */; };
 		3256E3811DCB91EB003C9718 /* MXCryptoConstants.h in Headers */ = {isa = PBXBuildFile; fileRef = 3256E37F1DCB91EB003C9718 /* MXCryptoConstants.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		3256E3821DCB91EB003C9718 /* MXCryptoConstants.m in Sources */ = {isa = PBXBuildFile; fileRef = 3256E3801DCB91EB003C9718 /* MXCryptoConstants.m */; };
 		32581DE823C8C0C900832EAA /* MXUserTrustLevel.h in Headers */ = {isa = PBXBuildFile; fileRef = 32581DE623C8C0C900832EAA /* MXUserTrustLevel.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -1291,6 +1293,8 @@
 		B1E09A3B2397FD820057C069 /* MXStoreNoStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 32832B5A1BCC048300241108 /* MXStoreNoStoreTests.m */; };
 		B1E09A3C2397FD820057C069 /* MXStoreMemoryStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 32832B591BCC048300241108 /* MXStoreMemoryStoreTests.m */; };
 		B1E09A3D2397FD820057C069 /* MXStoreFileStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 32832B581BCC048300241108 /* MXStoreFileStoreTests.m */; };
+		A42602010000000000000003 /* MXRoomBackwardPaginationStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A42602010000000000000001 /* MXRoomBackwardPaginationStoreTests.m */; };
+		A42602010000000000000006 /* MXBackwardPaginationStateTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A42602010000000000000004 /* MXBackwardPaginationStateTests.m */; };
 		B1E09A3E2397FD820057C069 /* MXToolsUnitTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 323C5A071A70E53500FB0549 /* MXToolsUnitTests.m */; };
 		B1E09A3F2397FD820057C069 /* MXNotificationCenterTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 32DC15D61A8DFF0D006F9AD3 /* MXNotificationCenterTests.m */; };
 		B1E09A402397FD820057C069 /* MXVoIPTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 329571921B0240CE00ABB3BA /* MXVoIPTests.m */; };
@@ -2184,6 +2188,8 @@
 		32549AF523F2E2790002576B /* MXKeyVerificationReady.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MXKeyVerificationReady.m; sourceTree = "<group>"; };
 		32549AF623F2E2790002576B /* MXKeyVerificationReady.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MXKeyVerificationReady.h; sourceTree = "<group>"; };
 		325653821A2E14ED00CC0423 /* MXStoreTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MXStoreTests.m; sourceTree = "<group>"; };
+		A42602010000000000000001 /* MXRoomBackwardPaginationStoreTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MXRoomBackwardPaginationStoreTests.m; sourceTree = "<group>"; };
+		A42602010000000000000004 /* MXBackwardPaginationStateTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MXBackwardPaginationStateTests.m; sourceTree = "<group>"; };
 		3256E37F1DCB91EB003C9718 /* MXCryptoConstants.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MXCryptoConstants.h; sourceTree = "<group>"; };
 		3256E3801DCB91EB003C9718 /* MXCryptoConstants.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MXCryptoConstants.m; sourceTree = "<group>"; };
 		32581DE623C8C0C900832EAA /* MXUserTrustLevel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MXUserTrustLevel.h; sourceTree = "<group>"; };
@@ -4159,6 +4165,8 @@
 				32832B581BCC048300241108 /* MXStoreFileStoreTests.m */,
 				32832B591BCC048300241108 /* MXStoreMemoryStoreTests.m */,
 				32832B5A1BCC048300241108 /* MXStoreNoStoreTests.m */,
+				A42602010000000000000001 /* MXRoomBackwardPaginationStoreTests.m */,
+				A42602010000000000000004 /* MXBackwardPaginationStateTests.m */,
 				325653821A2E14ED00CC0423 /* MXStoreTests.m */,
 				323C5A071A70E53500FB0549 /* MXToolsUnitTests.m */,
 				327137231A24BDDE00DB6757 /* MXUserTests.m */,
@@ -7088,6 +7096,8 @@
 				B14EECEE2578FE3F00448735 /* MXAuthenticationSessionUnitTests.swift in Sources */,
 				ED2DD11D286C4F4400F06731 /* MXCryptoRequestsUnitTests.swift in Sources */,
 				32832B5D1BCC048300241108 /* MXStoreMemoryStoreTests.m in Sources */,
+				A42602010000000000000002 /* MXRoomBackwardPaginationStoreTests.m in Sources */,
+				A42602010000000000000005 /* MXBackwardPaginationStateTests.m in Sources */,
 				EDB4209927DF842F0036AF39 /* MXEventFixtures.swift in Sources */,
 				ECDBE69328E5E16F000C83AF /* MXClientInformationServiceUnitTests.swift in Sources */,
 				32114A7F1A24E15500FF2EC4 /* MXMyUserTests.m in Sources */,
@@ -7742,6 +7752,8 @@
 				EC0B944727206D0B00B4D440 /* MXCoreDataRoomListDataManagerUnitTests.swift in Sources */,
 				B1E09A2B2397FD6B0057C069 /* MatrixSDKTestsE2EData.m in Sources */,
 				B1E09A3C2397FD820057C069 /* MXStoreMemoryStoreTests.m in Sources */,
+				A42602010000000000000003 /* MXRoomBackwardPaginationStoreTests.m in Sources */,
+				A42602010000000000000006 /* MXBackwardPaginationStateTests.m in Sources */,
 				EC1165CF27107F3E0089FA56 /* MXRoomListDataManagerTests.swift in Sources */,
 				ED7019E22886C28900FC31B9 /* MXCryptoProtocolStubs.swift in Sources */,
 				B1E09A3E2397FD820057C069 /* MXToolsUnitTests.m in Sources */,
