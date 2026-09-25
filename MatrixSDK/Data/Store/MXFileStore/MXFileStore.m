@@ -28,6 +28,7 @@
 #import "MXTools.h"
 #import "MatrixSDKSwiftHeader.h"
 #import "MXFileRoomSummaryStore.h"
+#import "MXSlidingSync.h"
 
 static NSUInteger const kMXFileVersion = 83;    // Check getUnreadRoomFromStore if you update this value. Delete this comment after
 
@@ -1982,9 +1983,17 @@ static NSUInteger preloadOptions;
         [super setEventStreamToken:metaData.eventStreamToken];
         backupEventStreamToken = self.eventStreamToken;
     }
+    else if (metaData && MXSlidingSyncHasPersistedPosition(credentials))
+    {
+        // Sliding Sync intentionally never writes a classic /sync token.
+        // MXSession persists this account/device checkpoint only after the
+        // timeline store commit. Its absence from legacy metadata is valid.
+        // Do not copy the position into eventStreamToken: /sync cannot use it.
+        MXLogDebug(@"[MXFileStore] loadMetaData: retaining Sliding Sync store (committed position present)");
+    }
     else
     {
-        MXLogDebug(@"[MXFileStore] loadMetaData: event stream token is missing");
+        MXLogDebug(@"[MXFileStore] loadMetaData: sync checkpoint missing or invalid metadata; clear=%@", enableClearData ? @"YES" : @"NO");
         [self logFiles];
         if (enableClearData)
         {

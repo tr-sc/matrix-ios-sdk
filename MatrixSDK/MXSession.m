@@ -435,8 +435,12 @@ typedef void (^MXOnResumeDone)(void);
                 return;
             }
 
-            // Can we start on data from the MXStore?
-            if (self.store.isPermanent && self.isEventStreamInitialised)
+            // Sliding Sync configuration/position is restored only by start,
+            // AFTER setStore. Mount its persisted user/account data and rooms
+            // now as well, without treating a Sliding Sync position as a
+            // classic /sync token or changing the selected sync transport.
+            BOOL hasSlidingSyncCheckpoint = MXSlidingSyncHasPersistedPosition(self.credentials);
+            if (self.store.isPermanent && (self.isEventStreamInitialised || hasSlidingSyncCheckpoint))
             {
                 // Mount data from the permanent store
                 MXLogDebug(@"[MXSession] Loading room state events to build MXRoom objects...");
@@ -451,7 +455,7 @@ typedef void (^MXOnResumeDone)(void);
                 }
                 else
                 {
-                    self->_myUser = [[MXMyUser alloc] initWithUserId:myUser.userId andDisplayname:myUser.displayname andAvatarUrl:myUser.avatarUrl];
+                    self->_myUser = [[MXMyUser alloc] initWithUserId:myUser.userId ?: self.credentials.userId andDisplayname:myUser.displayname andAvatarUrl:myUser.avatarUrl];
                 }
                 
                 self->_myUser.mxSession = self;
@@ -464,7 +468,12 @@ typedef void (^MXOnResumeDone)(void);
 
                 // Load user account data
                 [self handleAccountData:self.store.userAccountData];
-                
+                MXLogDebug(@"[MXSession] mounted cached profile: slidingCheckpoint=%@ user=%@ displayName=%@ accountData=%@",
+                           hasSlidingSyncCheckpoint ? @"YES" : @"NO",
+                           myUser ? @"present" : @"missing",
+                           self.myUser.displayname.length ? @"present" : @"missing",
+                           self.store.userAccountData.count ? @"present" : @"missing");
+
                 // Refresh identity server terms with complete account data
                 [self refreshIdentityServerServiceTerms];
 
@@ -973,11 +982,7 @@ typedef void (^MXOnResumeDone)(void);
 
 - (NSString *)slidingSyncPersistenceKey
 {
-    NSString *identity = [NSString stringWithFormat:@"%@|%@|%@",
-                          self.credentials.homeServer ?: @"",
-                          self.credentials.userId ?: @"",
-                          self.credentials.deviceId ?: @""];
-    return [@"MXSlidingSync." stringByAppendingString:identity];
+    return MXSlidingSyncPersistenceKey(self.credentials);
 }
 
 - (void)persistSlidingSyncState

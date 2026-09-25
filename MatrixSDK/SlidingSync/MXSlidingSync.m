@@ -4,6 +4,23 @@
 #import "MXSlidingSync.h"
 #import "MXSyncResponse.h"
 #import "MXRoomSync.h"
+#import "MXCredentials.h"
+
+NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentials)
+{
+    NSString *identity = [NSString stringWithFormat:@"%@|%@|%@",
+                          credentials.homeServer ?: @"",
+                          credentials.userId ?: @"",
+                          credentials.deviceId ?: @""];
+    return [@"MXSlidingSync." stringByAppendingString:identity];
+}
+
+BOOL MXSlidingSyncHasPersistedPosition(MXCredentials *credentials)
+{
+    NSDictionary *state = [NSUserDefaults.standardUserDefaults dictionaryForKey:MXSlidingSyncPersistenceKey(credentials)];
+    id position = state[@"position"];
+    return [position isKindOfClass:NSString.class] && [position length] > 0;
+}
 
 NSNotificationName const MXSessionRoomListStateDidChangeNotification = @"MXSessionRoomListStateDidChangeNotification";
 NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"MXSessionSlidingSyncRoomOrderDidChangeNotification";

@@ -126,6 +126,14 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
                                                selector: #selector(slidingSyncOrderUpdated(_:)),
                                                name: Notification.Name(rawValue: "MXSessionSlidingSyncRoomOrderDidChangeNotification"),
                                                object: session)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(roomListProgressUpdated(_:)),
+                                               name: Notification.Name(rawValue: "MXSessionRoomListStateDidChangeNotification"),
+                                               object: session)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(summaryStoreUpdated(_:)),
+                                               name: .NSManagedObjectContextObjectsDidChange,
+                                               object: store.mainManagedObjectContext)
     }
     
     //  MARK: - Delegate
@@ -182,13 +190,13 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     }
     
     func stop() {
+        NotificationCenter.default.removeObserver(self)
         cancelPendingDataUpdate()
         fetchedResultsController.delegate = nil
         removeCacheIfRequired()
     }
     
     deinit {
-        NotificationCenter.default.removeObserver(self)
         stop()
     }
     
@@ -276,8 +284,49 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
                                                total: totalCounts)
         data = MXRoomListData(rooms: mapped,
                               counts: counts,
-                              paginationOptions: fetchOptions.paginationOptions)
+                              paginationOptions: fetchOptions.paginationOptions,
+                              isRoomListSnapshotComplete: localStoreCoversServerRooms(serverOrder))
         fetchedResultsController.delegate = self
+    }
+
+    /// Check identity coverage before section filters (archive, spaces, etc.).
+    /// This runs on the same main context as the FRC and fetches identifiers
+    /// only; it never waits for or decrypts the background summary queue.
+    private func localStoreCoversServerRooms(_ serverOrder: [String]) -> Bool {
+        guard session?.roomListTotalsArePartial != true else { return false }
+        guard !serverOrder.isEmpty else { return true }
+        let request = NSFetchRequest<NSDictionary>(entityName: MXRoomSummaryMO.entity().name!)
+        request.resultType = .dictionaryResultType
+        request.propertiesToFetch = ["s_identifier"]
+        do {
+            let records = try store.mainManagedObjectContext.fetch(request)
+            let storedIDs = Set(records.compactMap { $0["s_identifier"] as? String })
+            let missing = Set(serverOrder).subtracting(storedIDs)
+            if !missing.isEmpty {
+                MXLog.debug("[MXCoreDataRoomListDataFetcher] local snapshot incomplete: server=\(serverOrder.count) stored=\(storedIDs.count) missing=\(missing.count)")
+            }
+            return missing.isEmpty
+        } catch {
+            MXLog.error("[MXCoreDataRoomListDataFetcher] cannot verify local snapshot coverage", context: error)
+            return false
+        }
+    }
+
+    @objc
+    private func roomListProgressUpdated(_ notification: Notification) {
+        scheduleDataUpdate()
+    }
+
+    @objc
+    private func summaryStoreUpdated(_ notification: Notification) {
+        // A section with zero matching rows may receive no FRC callback when
+        // the final room belongs to another section. Its completeness must
+        // still advance, or Home would stay partial indefinitely.
+        guard data?.isRoomListSnapshotComplete == false,
+              notification.userInfo?[NSInsertedObjectsKey] != nil
+                || notification.userInfo?[NSDeletedObjectsKey] != nil
+                || notification.userInfo?[NSUpdatedObjectsKey] != nil else { return }
+        scheduleDataUpdate()
     }
 
     @objc

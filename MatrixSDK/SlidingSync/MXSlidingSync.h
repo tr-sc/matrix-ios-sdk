@@ -7,6 +7,12 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @class MXFilterJSONModel;
+@class MXCredentials;
+
+/** Account/device-scoped checkpoint key shared by MXSession and MXFileStore. */
+FOUNDATION_EXPORT NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentials);
+/** Whether the account/device has a nonempty persisted Sliding Sync position. */
+FOUNDATION_EXPORT BOOL MXSlidingSyncHasPersistedPosition(MXCredentials *credentials);
 
 FOUNDATION_EXPORT NSNotificationName const MXSessionRoomListStateDidChangeNotification;
 FOUNDATION_EXPORT NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification;

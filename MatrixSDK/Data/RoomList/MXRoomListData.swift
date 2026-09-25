@@ -25,6 +25,10 @@ open class MXRoomListData: NSObject {
     public let paginationOptions: MXRoomListDataPaginationOptions
     /// Counts on the data
     public let counts: MXRoomListDataCounts
+    /// Whether the unfiltered local summary store covered the server room IDs
+    /// when this immutable snapshot was built. Network completion alone does
+    /// not mean asynchronous Core Data writes have reached the fetcher yet.
+    public let isRoomListSnapshotComplete: Bool
 
     // Summaries are mutable and shared with previously published lists. Capture
     // comparison values now, before a local echo or sync updates those objects.
@@ -91,8 +95,10 @@ open class MXRoomListData: NSObject {
     ///   - paginationOptions: pagination options
     public init(rooms: [MXRoomSummaryProtocol],
                 counts: MXRoomListDataCounts,
-                paginationOptions: MXRoomListDataPaginationOptions) {
+                paginationOptions: MXRoomListDataPaginationOptions,
+                isRoomListSnapshotComplete: Bool = true) {
         self.rooms = rooms
+        self.isRoomListSnapshotComplete = isRoomListSnapshotComplete
         self.counts = counts
         self.paginationOptions = paginationOptions
         self.roomSnapshots = rooms.map {
@@ -111,6 +117,7 @@ open class MXRoomListData: NSObject {
             return false
         }
         return paginationOptions == object.paginationOptions
+            && isRoomListSnapshotComplete == object.isRoomListSnapshotComplete
             && roomSnapshots == object.roomSnapshots
             && countsSnapshot == object.countsSnapshot
             && totalCountsSnapshot == object.totalCountsSnapshot
@@ -119,6 +126,7 @@ open class MXRoomListData: NSObject {
     public override var hash: Int {
         var hasher = Hasher()
         hasher.combine(paginationOptions.rawValue)
+        hasher.combine(isRoomListSnapshotComplete)
         hasher.combine(roomSnapshots)
         hasher.combine(countsSnapshot)
         hasher.combine(totalCountsSnapshot)
