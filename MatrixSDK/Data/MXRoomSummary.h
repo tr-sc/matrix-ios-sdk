@@ -243,6 +243,11 @@ FOUNDATION_EXPORT NSUInteger const MXRoomSummaryPaginationChunkSize;
  */
 @property (nonatomic, readonly) MXRoomLastMessage *lastMessage;
 
+/** Persistent revision of inputs to preview search, independent of its result. */
+@property (nonatomic, readonly) NSString *lastMessageSearchRevision;
+/** Invalidate after timeline/key changes. The caller must save the summary. */
+- (void)invalidateLastMessageSearch;
+
 /**
  Intenal SDK method to update the last message.
  */

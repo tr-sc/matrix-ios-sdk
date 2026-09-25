@@ -1828,6 +1828,12 @@ typedef void (^MXOnResumeDone)(void);
                                                                                   timeout:serverTimeout
                                                                               setPresence:setPresence];
     NSDate *startedAt = NSDate.date;
+    NSUInteger requestedRangeEnd = self.slidingSyncRangeEnd;
+    NSString *requestedPosition = self.slidingSyncPosition;
+    MXLogDebug(@"[MXSession][SlidingSync] request range=0..%tu timeout=%tu loaded=%tu total=%tu hydration=%@ position=%@",
+               requestedRangeEnd, serverTimeout, self.slidingSyncRoomOrder.count, self.slidingSyncTotalRoomCount,
+               self.slidingSyncConfiguration.backgroundHydrationEnabled ? @"YES" : @"NO",
+               requestedPosition.length ? @"present" : @"missing");
     MXWeakify(self);
     eventStreamRequest = [matrixRestClient slidingSyncWithRequest:request success:^(MXSlidingSyncResponse *response) {
         MXStrongifyAndReturnIfNil(self);
@@ -1837,6 +1843,10 @@ typedef void (^MXOnResumeDone)(void);
         MXLogDebug(@"[MXSession][SlidingSync] response received in %.0fms at pos %@", [NSDate.date timeIntervalSinceDate:startedAt] * 1000, response.position);
 
         MXSlidingSyncList *list = response.lists[self.slidingSyncConfiguration.listName];
+        MXLogDebug(@"[MXSession][SlidingSync] response range=0..%tu rooms=%tu listPresent=%@ count=%tu ops=%tu positionChanged=%@ elapsedMs=%.0f",
+                   requestedRangeEnd, response.rooms.count, list ? @"YES" : @"NO", list.count, list.operations.count,
+                   [requestedPosition isEqualToString:response.position] ? @"NO" : @"YES",
+                   [NSDate.date timeIntervalSinceDate:startedAt] * 1000);
         void (^processLegacyResponse)(MXSyncResponse *) = ^(MXSyncResponse *legacyResponse) {
             void (^processResponse)(void) = ^{
                 if (!self->eventStreamRequest) return;

@@ -223,7 +223,10 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     }
 
     private func scheduleDataUpdate() {
-        pendingDataUpdate?.cancel()
+        // Bound the wait from the first change. Preview backfill can save
+        // summaries continuously; a trailing debounce would hide the full
+        // room list until that unrelated work finishes.
+        guard pendingDataUpdate == nil else { return }
         dataUpdateGeneration &+= 1
         let generation = dataUpdateGeneration
         let workItem = DispatchWorkItem { [weak self] in

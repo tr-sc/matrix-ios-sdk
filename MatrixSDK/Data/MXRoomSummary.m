@@ -315,6 +315,17 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
 
 #pragma mark - Data related to the last message
 
+- (NSString *)lastMessageSearchRevision
+{
+    return self.others[@"org.matrix.preview_search.revision"] ?: @"initial";
+}
+
+- (void)invalidateLastMessageSearch
+{
+    if (!self.others) self.others = [NSMutableDictionary dictionary];
+    self.others[@"org.matrix.preview_search.revision"] = NSUUID.UUID.UUIDString;
+}
+
 - (void)updateLastMessage:(MXRoomLastMessage *)message
 {
     // if there is a new LastMessage then it's better to unmark the room as unread
@@ -401,14 +412,27 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     // Process every message received by back pagination
     __block BOOL lastMessageUpdated = NO;
     MXWeakify(timeline);
-    [timeline listenToEvents:^(MXEvent *event, MXTimelineDirection direction, MXRoomState *eventState) {
+    NSMutableDictionary<NSString *, NSNumber *> *eventTypes = [NSMutableDictionary dictionary];
+    __block NSUInteger rejected = 0, encrypted = 0, redacted = 0, edits = 0, threads = 0;
+    MXEventListener *listener = [timeline listenToEvents:^(MXEvent *event, MXTimelineDirection direction, MXRoomState *eventState) {
         MXStrongifyAndReturnIfNil(timeline);
         if (direction == MXTimelineDirectionBackwards
             && !lastMessageUpdated)
         {
+            NSString *type = event.type ?: @"unknown";
+            eventTypes[type] = @([eventTypes[type] unsignedIntegerValue] + 1);
+            encrypted += event.eventType == MXEventTypeRoomEncrypted;
+            redacted += event.isRedactedEvent;
+            edits += event.isEditEvent;
+            threads += event.isInThread;
             lastMessageUpdated = [self.mxSession.roomSummaryUpdateDelegate session:self.mxSession updateRoomSummary:self withLastEvent:event eventState:eventState roomState:timeline.state];
+            if (!lastMessageUpdated) rejected++;
         }
     }];
+    void (^pageFailure)(NSError *) = ^(NSError *error) {
+        [timeline removeListener:listener];
+        if (failure) failure(error);
+    };
     
    
     if (timeline.remainingMessagesForBackPaginationInStore)
@@ -419,6 +443,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
                                                  direction:MXTimelineDirectionBackwards
                                              onlyFromStore:YES
                                                   complete:^{
+            [timeline removeListener:listener];
             if (lastMessageUpdated)
             {
                 // We are done
@@ -431,7 +456,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
                 [self fetchLastMessageWithMaxServerPaginationCount:maxServerPaginationCount onComplete:onComplete failure:failure timeline:timeline operation:operation commit:commit];
             }
             
-        } failure:failure];
+        } failure:pageFailure];
         
         [operation mutateTo:newOperation];
     }
@@ -446,6 +471,9 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
                                                  direction:MXTimelineDirectionBackwards
                                              onlyFromStore:NO
                                                   complete:^{
+            [timeline removeListener:listener];
+            MXLogDebug(@"[MXRoomSummary] preview_search_page room=%@ found=%@ rejected=%tu encrypted=%tu redacted=%tu edits=%tu threads=%tu types=%@",
+                       self.roomId, lastMessageUpdated ? @"YES" : @"NO", rejected, encrypted, redacted, edits, threads, eventTypes);
             if (lastMessageUpdated)
             {
                 // We are done
@@ -464,12 +492,13 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
                 onComplete();
             }
             
-        } failure:failure];
+        } failure:pageFailure];
         
         [operation mutateTo:newOperation];
     }
     else
     {
+        [timeline removeListener:listener];
         MXLogDebug(@"[MXRoomSummary] fetchLastMessage: Failed to find last message in %@.", self.roomId);
         onComplete();
     }
@@ -508,6 +537,8 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     {
         MXLogDebug(@"[MXRoomSummary] roomDidFlushData: %@", _roomId);
 
+        [self invalidateLastMessageSearch];
+        [self save:YES];
         [self resetRoomStateData];
     }
 }
@@ -848,6 +879,27 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
         BOOL updated = self->updatedWithStateEvents;
         self->updatedWithStateEvents = NO;
 
+        // A replay of the same tail is not a new search input. Account data
+        // (read receipts/tags) alone must not invalidate a checked preview.
+        NSString *tailEventId = roomSync.timeline.events.lastObject.eventId;
+        BOOL tailChanged = tailEventId.length && ![tailEventId isEqual:self.others[@"org.matrix.preview_search.tail"]];
+        NSMutableArray<NSString *> *stateIds = [NSMutableArray array];
+        for (MXEvent *event in roomSync.state.events)
+        {
+            if (event.eventId) [stateIds addObject:event.eventId];
+        }
+        [stateIds sortUsingSelector:@selector(compare:)];
+        BOOL stateChanged = stateIds.count && ![stateIds isEqual:self.others[@"org.matrix.preview_search.state"]];
+        if (tailChanged || stateChanged)
+        {
+            [self invalidateLastMessageSearch];
+            if (tailEventId) self.others[@"org.matrix.preview_search.tail"] = tailEventId;
+            if (stateIds.count) self.others[@"org.matrix.preview_search.state"] = stateIds;
+            MXLogDebug(@"[MXRoomSummary] preview_search_invalidated room=%@ tailChanged=%@ stateChanged=%@",
+                       self.roomId, tailChanged ? @"YES" : @"NO", stateChanged ? @"YES" : @"NO");
+            updated = YES;
+        }
+
         // Handle room summary sent by the home server
         // Call the method too in case of non lazy loading and no server room summary.
         // This will share the same algorithm to compute room name, avatar, members count.
@@ -945,6 +997,9 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
 
     if (room)
     {
+        // Local echoes, edits and decryption can change an existing event ID.
+        [self invalidateLastMessageSearch];
+        [self save:NO];
         MXWeakify(self);
         [self.room state:^(MXRoomState *roomState) {
             MXStrongifyAndReturnIfNil(self);
