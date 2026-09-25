@@ -424,6 +424,9 @@ FOUNDATION_EXPORT NSString *const kMXSessionNoRoomTag;
 /** Loaded room ids in server order. Empty while Sliding Sync is disabled. */
 @property (atomic, copy, readonly) NSArray<NSString *> *slidingSyncRoomOrder;
 
+/** Rooms excluded by a verified list refresh. Their cached history is retained. */
+@property (atomic, copy, readonly) NSSet<NSString *> *slidingSyncExcludedRoomIds;
+
 /** YES while aggregate unread totals cover only the hydrated rooms. */
 @property (nonatomic, readonly) BOOL roomListTotalsArePartial;
 

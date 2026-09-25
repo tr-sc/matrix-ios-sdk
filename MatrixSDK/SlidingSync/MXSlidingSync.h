@@ -14,6 +14,9 @@ FOUNDATION_EXPORT NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentia
 /** Whether the account/device has a nonempty persisted Sliding Sync position. */
 FOUNDATION_EXPORT BOOL MXSlidingSyncHasPersistedPosition(MXCredentials *credentials);
 
+/** Membership carried by a simplified room (including required_state/invite_state). */
+FOUNDATION_EXPORT NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId);
+
 FOUNDATION_EXPORT NSNotificationName const MXSessionRoomListStateDidChangeNotification;
 FOUNDATION_EXPORT NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification;
 
@@ -66,6 +69,7 @@ typedef NS_ENUM(NSUInteger, MXSlidingSyncRoomListPhase) {
 @end
 
 @interface MXSlidingSyncList : MXJSONModel
+@property (nonatomic) BOOL hasCount;
 @property (nonatomic) NSUInteger count;
 @property (nonatomic, copy) NSArray<MXSlidingSyncListOperation *> *operations;
 @end

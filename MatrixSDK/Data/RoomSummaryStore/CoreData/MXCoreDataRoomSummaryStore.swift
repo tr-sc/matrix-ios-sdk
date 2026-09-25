@@ -17,6 +17,42 @@
 import Foundation
 import CoreData
 
+#if DEBUG
+/// Aggregate across context queues without logging every saved room.
+private final class MXSummaryWriteDiagnostics {
+    private struct Sample {
+        var count = 0
+        var changed = 0
+        var waitTotal = 0.0
+        var waitMax = 0.0
+        var mapTotal = 0.0
+        var saveTotal = 0.0
+        var saveMax = 0.0
+        var started = ProcessInfo.processInfo.systemUptime
+    }
+    private let lock = NSLock()
+    private var samples: [String: Sample] = [:]
+
+    func record(stage: String, wait: TimeInterval, map: TimeInterval, save: TimeInterval, changed: Bool) {
+        lock.lock()
+        var sample = samples[stage] ?? Sample()
+        sample.count += 1
+        sample.changed += changed ? 1 : 0
+        sample.waitTotal += wait
+        sample.waitMax = max(sample.waitMax, wait)
+        sample.mapTotal += map
+        sample.saveTotal += save
+        sample.saveMax = max(sample.saveMax, save)
+        let report = sample.count >= 50 || ProcessInfo.processInfo.systemUptime - sample.started >= 1
+        samples[stage] = report ? Sample() : sample
+        lock.unlock()
+        guard report else { return }
+        let scale = 1000 / Double(sample.count)
+        MXLog.debug("[MXCoreDataRoomSummaryStore] write_metrics stage=\(stage) operations=\(sample.count) changed=\(sample.changed) waitAvgMs=\(Int(sample.waitTotal * scale)) waitMaxMs=\(Int(sample.waitMax * 1000)) mapAvgMs=\(Int(sample.mapTotal * scale)) saveAvgMs=\(Int(sample.saveTotal * scale)) saveMaxMs=\(Int(sample.saveMax * 1000))")
+    }
+}
+#endif
+
 @objcMembers
 public class MXCoreDataRoomSummaryStore: NSObject {
     
@@ -27,6 +63,9 @@ public class MXCoreDataRoomSummaryStore: NSObject {
     }
     
     private let credentials: MXCredentials
+    #if DEBUG
+    private let writeDiagnostics = MXSummaryWriteDiagnostics()
+    #endif
 
     private lazy var persistenceCoordinator: NSPersistentStoreCoordinator = {
         let result = NSPersistentStoreCoordinator(managedObjectModel: Self.managedObjectModel)
@@ -182,9 +221,15 @@ public class MXCoreDataRoomSummaryStore: NSObject {
     
     private func saveSummary(_ summary: MXRoomSummaryProtocol) {
         let moc = backgroundMoc
+        #if DEBUG
+        let enqueued = ProcessInfo.processInfo.systemUptime
+        #endif
         
         moc.perform { [weak self] in
             guard let self = self else { return }
+            #if DEBUG
+            let started = ProcessInfo.processInfo.systemUptime
+            #endif
             if let existing = self.fetchSummaryMO(forRoomId: summary.roomId, in: moc) {
                 existing.update(withRoomSummary: summary, in: moc)
             } else {
@@ -196,7 +241,16 @@ public class MXCoreDataRoomSummaryStore: NSObject {
                 }
             }
             
+            #if DEBUG
+            let mapped = ProcessInfo.processInfo.systemUptime
+            let changed = moc.hasChanges
+            #endif
             self.saveIfNeeded(moc)
+            #if DEBUG
+            self.writeDiagnostics.record(stage: "summary", wait: started - enqueued,
+                                         map: mapped - started, save: ProcessInfo.processInfo.systemUptime - mapped,
+                                         changed: changed)
+            #endif
         }
     }
     
@@ -279,8 +333,20 @@ public class MXCoreDataRoomSummaryStore: NSObject {
         if saved {
             //  save all parent contexts recursively
             if let parent = moc.parent {
+                #if DEBUG
+                let enqueued = ProcessInfo.processInfo.systemUptime
+                let stage = parent.concurrencyType == .mainQueueConcurrencyType ? "main" : "disk"
+                #endif
                 parent.perform {
+                    #if DEBUG
+                    let started = ProcessInfo.processInfo.systemUptime
+                    let changed = parent.hasChanges
+                    #endif
                     self.saveIfNeeded(parent)
+                    #if DEBUG
+                    self.writeDiagnostics.record(stage: stage, wait: started - enqueued, map: 0,
+                                                 save: ProcessInfo.processInfo.systemUptime - started, changed: changed)
+                    #endif
                 }
             }
         }

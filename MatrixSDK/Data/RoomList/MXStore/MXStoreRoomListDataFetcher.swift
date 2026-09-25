@@ -156,6 +156,8 @@ internal class MXStoreRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     /// Compute data up to a numberOfItems
     private func computeData(upto numberOfItems: Int) -> MXRoomListData {
         var rooms = Array(roomSummaries.values)
+        let excluded = session?.slidingSyncExcludedRoomIds ?? []
+        rooms.removeAll { excluded.contains($0.roomId) }
         rooms = filterRooms(rooms)
         let serverOrder = session?.slidingSyncRoomOrder ?? []
         if serverOrder.isEmpty {

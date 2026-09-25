@@ -337,6 +337,7 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         // Sliding Sync fetches only hydrated summaries, so an unrestricted FRC is cheap for
         // the initial window and is required to preserve server order across section filters.
         fetchedResultsController.fetchRequest.fetchLimit = 0
+        fetchedResultsController.fetchRequest.predicate = filterPredicate(for: filterOptions)
         performFetch()
     }
 
@@ -418,6 +419,10 @@ extension MXCoreDataRoomListDataFetcher: MXRoomListDataFilterable {
     
     func filterPredicate(for filterOptions: MXRoomListDataFilterOptions) -> NSPredicate? {
         var predicates: [NSPredicate] = []
+        if let excluded = session?.slidingSyncExcludedRoomIds, !excluded.isEmpty {
+            predicates.append(NSPredicate(format: "NOT (%K IN %@)",
+                                          #keyPath(MXRoomSummaryMO.s_identifier), Array(excluded)))
+        }
         
         if !filterOptions.onlySuggested {
             if filterOptions.hideUnknownMembershipRooms {

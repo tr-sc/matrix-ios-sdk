@@ -170,6 +170,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     MXSlidingSyncList *model = [MXSlidingSyncList new];
     NSNumber *count;
     MXJSONModelSetNumber(count, json[@"count"]);
+    model.hasCount = [json[@"count"] isKindOfClass:NSNumber.class] && count.longLongValue >= 0;
     model.count = count.unsignedIntegerValue;
     NSArray *operationsJSON;
     MXJSONModelSetArray(operationsJSON, json[@"ops"]);
@@ -217,7 +218,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     return @{@"pos": self.position ?: @"", @"lists": lists, @"rooms": self.rooms ?: @{}, @"extensions": self.extensions ?: @{}};
 }
 
-static NSString *membershipForRoom(NSDictionary *room, NSString *userId)
+NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId)
 {
     if ([room[@"membership"] isKindOfClass:NSString.class]) return room[@"membership"];
     NSArray *state = room[@"required_state"];
@@ -240,7 +241,7 @@ static NSString *membershipForRoom(NSDictionary *room, NSString *userId)
     NSDictionary *typing = self.extensions[@"typing"][@"rooms"];
 
     [self.rooms enumerateKeysAndObjectsUsingBlock:^(NSString *roomId, NSDictionary *room, BOOL *stop) {
-        NSString *membership = membershipForRoom(room, userId);
+        NSString *membership = MXSlidingSyncMembershipForRoom(room, userId);
         if ([membership isEqual:@"invite"])
         {
             NSArray *events = room[@"invite_state"] ?: room[@"required_state"] ?: @[];
