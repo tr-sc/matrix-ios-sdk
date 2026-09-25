@@ -1657,6 +1657,15 @@ typedef void (^MXOnResumeDone)(void);
         || (self.roomListState != nil && self.roomListState.phase != MXSlidingSyncRoomListPhaseComplete);
 }
 
+- (NSArray<NSString *> *)slidingSyncInitialWindowRoomIds
+{
+    if (!self.slidingSyncConfiguration) return @[];
+    NSUInteger count = MIN(MAX(self.slidingSyncConfiguration.initialWindowSize, 1), self.slidingSyncTotalRoomCount);
+    NSArray<NSString *> *order = self.slidingSyncRoomOrder;
+    if (!self.roomListReady || order.count < count) return nil;
+    return [order subarrayWithRange:NSMakeRange(0, count)];
+}
+
 #pragma mark - MXSession pause prevention
 - (void)retainPreventPause
 {

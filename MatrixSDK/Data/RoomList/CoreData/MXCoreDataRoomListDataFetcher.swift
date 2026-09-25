@@ -285,19 +285,22 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         }
         let counts = MXStoreRoomListDataCounts(withRooms: mapped,
                                                total: totalCounts)
+        let coverage = localStoreCoverage(serverOrder)
         data = MXRoomListData(rooms: mapped,
                               counts: counts,
                               paginationOptions: fetchOptions.paginationOptions,
-                              isRoomListSnapshotComplete: localStoreCoversServerRooms(serverOrder))
+                              isRoomListSnapshotComplete: coverage.complete,
+                              isInitialRoomListWindowReady: coverage.initialWindowReady)
         fetchedResultsController.delegate = self
     }
 
     /// Check identity coverage before section filters (archive, spaces, etc.).
     /// This runs on the same main context as the FRC and fetches identifiers
     /// only; it never waits for or decrypts the background summary queue.
-    private func localStoreCoversServerRooms(_ serverOrder: [String]) -> Bool {
-        guard session?.roomListTotalsArePartial != true else { return false }
-        guard !serverOrder.isEmpty else { return true }
+    private func localStoreCoverage(_ serverOrder: [String]) -> (complete: Bool, initialWindowReady: Bool) {
+        let networkComplete = session?.roomListTotalsArePartial != true
+        let initialIDs: [String]? = session == nil ? [] : session?.slidingSyncInitialWindowRoomIds
+        guard !serverOrder.isEmpty else { return (networkComplete, initialIDs != nil) }
         let request = NSFetchRequest<NSDictionary>(entityName: MXRoomSummaryMO.entity().name!)
         request.resultType = .dictionaryResultType
         request.propertiesToFetch = ["s_identifier"]
@@ -305,13 +308,14 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
             let records = try store.mainManagedObjectContext.fetch(request)
             let storedIDs = Set(records.compactMap { $0["s_identifier"] as? String })
             let missing = Set(serverOrder).subtracting(storedIDs)
-            if !missing.isEmpty {
+            if networkComplete && !missing.isEmpty {
                 MXLog.debug("[MXCoreDataRoomListDataFetcher] local snapshot incomplete: server=\(serverOrder.count) stored=\(storedIDs.count) missing=\(missing.count)")
             }
-            return missing.isEmpty
+            return (networkComplete && missing.isEmpty,
+                    initialIDs.map { Set($0).isSubset(of: storedIDs) } ?? false)
         } catch {
             MXLog.error("[MXCoreDataRoomListDataFetcher] cannot verify local snapshot coverage", context: error)
-            return false
+            return (false, false)
         }
     }
 
