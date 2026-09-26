@@ -17,6 +17,9 @@
 
 #import "MXFileRoomStore.h"
 
+static NSString *const kMXFileRoomStoreBackwardPaginationStateV1Key = @"backwardPaginationStateV1";
+static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHomeServerPaginationEnd";
+
 @implementation MXFileRoomStore
 
 #pragma mark - NSCoding
@@ -29,7 +32,34 @@
 
         self.paginationToken = [aDecoder decodeObjectForKey:@"paginationToken"];
 
-        self.hasReachedHomeServerPaginationEnd = [aDecoder decodeBoolForKey:@"hasReachedHomeServerPaginationEnd"];
+        if ([aDecoder containsValueForKey:kMXFileRoomStoreBackwardPaginationStateV1Key])
+        {
+            NSInteger rawState = [aDecoder decodeIntegerForKey:kMXFileRoomStoreBackwardPaginationStateV1Key];
+            if (rawState >= (NSInteger)MXRoomBackwardPaginationStateUnknown
+                && rawState <= (NSInteger)MXRoomBackwardPaginationStateExhausted)
+            {
+                self.backwardPaginationState = (MXRoomBackwardPaginationState)rawState;
+            }
+            else
+            {
+                MXLogWarning(@"[MXFileRoomStore] Invalid backward pagination state: %@", @(rawState));
+                self.backwardPaginationState = MXRoomBackwardPaginationStateUnknown;
+            }
+        }
+        else
+        {
+            BOOL legacyPaginationEnd = [aDecoder decodeBoolForKey:kMXFileRoomStoreLegacyPaginationEndKey];
+            if (!legacyPaginationEnd && self.paginationToken.length > 0)
+            {
+                self.backwardPaginationState = MXRoomBackwardPaginationStateAvailable;
+            }
+            else
+            {
+                // Legacy YES may have been written for a Sliding Sync response whose
+                // pagination status was actually unknown, so it cannot be trusted.
+                self.backwardPaginationState = MXRoomBackwardPaginationStateUnknown;
+            }
+        }
         self.hasLoadedAllRoomMembersForRoom = [aDecoder decodeBoolForKey:@"hasLoadedAllRoomMembersForRoom"];
 
         self.partialAttributedTextMessage = [aDecoder decodeObjectForKey:@"partialAttributedTextMessage"];
@@ -62,7 +92,9 @@
         [aCoder encodeObject:self.paginationToken forKey:@"paginationToken"];
     }
     
-    [aCoder encodeBool:self.hasReachedHomeServerPaginationEnd forKey:@"hasReachedHomeServerPaginationEnd"];
+    [aCoder encodeInteger:self.backwardPaginationState forKey:kMXFileRoomStoreBackwardPaginationStateV1Key];
+    [aCoder encodeBool:self.backwardPaginationState == MXRoomBackwardPaginationStateExhausted
+                forKey:kMXFileRoomStoreLegacyPaginationEndKey];
     [aCoder encodeBool:self.hasLoadedAllRoomMembersForRoom forKey:@"hasLoadedAllRoomMembersForRoom"];
 
     if (self.partialAttributedTextMessage)

@@ -35,10 +35,22 @@
     {
         messages = [NSMutableArray array];
         messagesByEventIds = [NSMutableDictionary dictionary];
-        _hasReachedHomeServerPaginationEnd = NO;
+        _backwardPaginationState = MXRoomBackwardPaginationStateUnknown;
         _hasLoadedAllRoomMembersForRoom = NO;
     }
     return self;
+}
+
+- (void)setHasReachedHomeServerPaginationEnd:(BOOL)hasReachedHomeServerPaginationEnd
+{
+    self.backwardPaginationState = hasReachedHomeServerPaginationEnd
+        ? MXRoomBackwardPaginationStateExhausted
+        : MXRoomBackwardPaginationStateUnknown;
+}
+
+- (BOOL)hasReachedHomeServerPaginationEnd
+{
+    return self.backwardPaginationState == MXRoomBackwardPaginationStateExhausted;
 }
 
 - (void)storeEvent:(MXEvent *)event direction:(MXTimelineDirection)direction
@@ -194,7 +206,7 @@
 
 - (NSString *)description
 {
-    return [NSString stringWithFormat:@"%tu messages - paginationToken: %@ - hasReachedHomeServerPaginationEnd: %@ - hasLoadedAllRoomMembersForRoom: %@", messages.count, _paginationToken, @(_hasReachedHomeServerPaginationEnd), @(_hasLoadedAllRoomMembersForRoom)];
+    return [NSString stringWithFormat:@"%tu messages - paginationToken: %@ - backwardPaginationState: %tu - hasLoadedAllRoomMembersForRoom: %@", messages.count, _paginationToken, self.backwardPaginationState, @(_hasLoadedAllRoomMembersForRoom)];
 }
 
 - (BOOL)removeAllMessagesSentBefore:(uint64_t)limitTs

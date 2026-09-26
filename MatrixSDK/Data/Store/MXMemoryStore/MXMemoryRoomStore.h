@@ -77,6 +77,11 @@
 @property (nonatomic) BOOL hasReachedHomeServerPaginationEnd;
 
 /**
+ The state of backward pagination for the room.
+ */
+@property (nonatomic) MXRoomBackwardPaginationState backwardPaginationState;
+
+/**
  The flag indicating that the SDK has retrieved all room members.
  */
 @property (nonatomic) BOOL hasLoadedAllRoomMembersForRoom;

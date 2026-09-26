@@ -26,6 +26,12 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /**
+ SDK-internal JSON key used to preserve Sliding Sync room provenance while the
+ response travels through the legacy sync pipeline.
+ */
+FOUNDATION_EXPORT NSString * const MXRoomSyncSlidingSyncInitialJSONKey;
+
+/**
  `MXRoomSync` represents the response for a room during server sync.
  */
 @interface MXRoomSync : MXJSONModel
@@ -64,6 +70,14 @@ NS_ASSUME_NONNULL_BEGIN
  The room summary. Sent in case of lazy-loading of members.
  */
 @property (nonatomic) MXRoomSyncSummary *summary;
+
+/**
+ Whether this room payload was initial in Sliding Sync.
+
+ `nil` identifies a regular `/sync` payload.  `@YES` and `@NO` identify initial
+ and incremental Sliding Sync room payloads respectively.
+ */
+@property (nonatomic, nullable) NSNumber *slidingSyncInitial;
 
 @end
 

@@ -16,6 +16,8 @@
 
 #import "MXHTTPClient.h"
 
+typedef dispatch_block_t (^MXHTTPRetryScheduler)(NSTimeInterval delay, dispatch_block_t action);
+
 /**
  The `MXHTTPClient_Private` extension exposes internal operations like methods
  required for testing.
@@ -28,6 +30,17 @@
  FTR, OHHTTPStubs solves that by doing some swizzling (https://github.com/AliSoftware/OHHTTPStubs/blob/c7c96546db35d5bb15f027b42b9208e57f6c4289/OHHTTPStubs/Sources/NSURLSession/OHHTTPStubs%2BNSURLSessionConfiguration.m#L54).
  */
 @interface MXHTTPClient ()
+
+// Per-client test seams. Production uses the default URLSession configuration,
+// main-queue dispatch timers and AFNetworking reachability.
+- (instancetype)initWithBaseURL:(NSString *)baseURL
+                 authenticated:(BOOL)authenticated
+andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)block
+          sessionConfiguration:(NSURLSessionConfiguration *)configuration;
+@property (nonatomic, copy) MXHTTPRetryScheduler retryScheduler;
+@property (nonatomic, copy) BOOL (^networkReachable)(void);
+- (dispatch_block_t)scheduleRetryAfter:(NSTimeInterval)delay action:(dispatch_block_t)action;
+- (BOOL)isNetworkReachable;
 
 /**
  Set a delay in the reponse of requests containing `string` in their path.

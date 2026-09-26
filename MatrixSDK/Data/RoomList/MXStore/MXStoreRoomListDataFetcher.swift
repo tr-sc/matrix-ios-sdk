@@ -156,6 +156,8 @@ internal class MXStoreRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     /// Compute data up to a numberOfItems
     private func computeData(upto numberOfItems: Int) -> MXRoomListData {
         var rooms = Array(roomSummaries.values)
+        let excluded = session?.slidingSyncExcludedRoomIds ?? []
+        rooms.removeAll { excluded.contains($0.roomId) }
         rooms = filterRooms(rooms)
         let serverOrder = session?.slidingSyncRoomOrder ?? []
         if serverOrder.isEmpty {
@@ -179,10 +181,15 @@ internal class MXStoreRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
             rooms = Array(rooms[0..<numberOfItems])
         }
         
+        let storedIDs = Set(roomSummaries.keys)
+        let initialIDs: [String]? = session == nil ? [] : session?.slidingSyncInitialWindowRoomIds
         return MXRoomListData(rooms: rooms,
                               counts: MXStoreRoomListDataCounts(withRooms: rooms,
                                                                 total: total),
-                              paginationOptions: fetchOptions.paginationOptions)
+                              paginationOptions: fetchOptions.paginationOptions,
+                              isRoomListSnapshotComplete: session?.roomListTotalsArePartial != true
+                                && Set(serverOrder).isSubset(of: storedIDs),
+                              isInitialRoomListWindowReady: initialIDs.map { Set($0).isSubset(of: storedIDs) } ?? false)
     }
     
     private func notifyDataChange(totalCountsChanged: Bool) {

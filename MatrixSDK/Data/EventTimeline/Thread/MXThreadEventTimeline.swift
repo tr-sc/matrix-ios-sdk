@@ -30,6 +30,8 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
     public var isLiveTimeline: Bool = false
     
     public var roomEventFilter: MXRoomEventFilter?
+
+    public var paginationMaxNumberOfTries: NSNumber?
     
     public var state: MXRoomState?  // not used
     
@@ -290,6 +292,9 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
                                                                     failure(error)
                                                                 }
                                                             })
+                if let limit = self.paginationMaxNumberOfTries {
+                    operation2.maxNumberOfTries = min(operation2.maxNumberOfTries, limit.uintValue)
+                }
                 operation.mutate(to: operation2)
             }
         }
@@ -368,6 +373,7 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
         let copy = MXThreadEventTimeline(thread: thread, initialEventId: initialEventId, andStore: store)
         
         copy.roomEventFilter = roomEventFilter
+        copy.paginationMaxNumberOfTries = paginationMaxNumberOfTries
         
         // There can be only a single live timeline
         copy.isLiveTimeline = false

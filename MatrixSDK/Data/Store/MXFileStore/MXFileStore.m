@@ -28,6 +28,7 @@
 #import "MXTools.h"
 #import "MatrixSDKSwiftHeader.h"
 #import "MXFileRoomSummaryStore.h"
+#import "MXSlidingSync.h"
 
 static NSUInteger const kMXFileVersion = 83;    // Check getUnreadRoomFromStore if you update this value. Delete this comment after
 
@@ -115,10 +116,10 @@ static NSUInteger preloadOptions;
     // The number of commits being done
     NSUInteger pendingCommits;
 
-    // Completion blocks grouped by the commit pass that makes their data
-    // durable. Calls merged into the second pending pass append to its group
-    // instead of losing their completion.
+    // Completion blocks grouped by the commit pass that makes their data durable.
     NSMutableArray<NSMutableArray<void (^)(void)> *> *pendingCommitCompletions;
+    BOOL deferredCommitRequested;
+    NSMutableArray<void (^)(void)> *deferredCommitCompletions;
     
     NSDate *backgroundTaskStartDate;
 
@@ -598,7 +599,13 @@ static NSUInteger preloadOptions;
 
 - (void)storeHasReachedHomeServerPaginationEndForRoom:(NSString *)roomId andValue:(BOOL)value
 {
-    [super storeHasReachedHomeServerPaginationEndForRoom:roomId andValue:value];
+    [self storeBackwardPaginationStateForRoom:roomId
+                                        state:value ? MXRoomBackwardPaginationStateExhausted : MXRoomBackwardPaginationStateUnknown];
+}
+
+- (void)storeBackwardPaginationStateForRoom:(NSString *)roomId state:(MXRoomBackwardPaginationState)state
+{
+    [super storeBackwardPaginationStateForRoom:roomId state:state];
 
     if (NSNotFound == [roomsToCommitForMessages indexOfObject:roomId])
     {
@@ -966,14 +973,15 @@ static NSUInteger preloadOptions;
             pendingCommitCompletions = [NSMutableArray array];
         }
 
-        // If there are already 2 pending commits, if the data is not stored during the 1st commit operation,
-        // we are sure that it will be done on the second pass.
+        // Pending passes have already captured their dirty room IDs. A new
+        // request must get a later pass, including while summary flushes wait.
         if (pendingCommits >= 2)
         {
-            MXLogDebug(@"[MXFileStore commit] Ignore it. There are already pending commits");
+            deferredCommitRequested = YES;
+            if (!deferredCommitCompletions) deferredCommitCompletions = [NSMutableArray array];
             if (completion)
             {
-                [pendingCommitCompletions.lastObject addObject:[completion copy]];
+                [deferredCommitCompletions addObject:[completion copy]];
             }
             return;
         }
@@ -1024,28 +1032,50 @@ static NSUInteger preloadOptions;
             // Release the background task if there is no more pending commits
             dispatch_async(dispatch_get_main_queue(), ^(void){
 
-                MXLogDebug(@"[MXFileStore commit] lasted %.0fms", [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
+                // Keep the commit background task and its callbacks alive
+                // until queued summary batches have reached SQLite as well.
+                void (^finishCommit)(void) = ^{
+                    MXLogDebug(@"[MXFileStore commit] lasted %.0fms", [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
 
-                self->pendingCommits--;
-                NSArray<void (^)(void)> *completions = self->pendingCommitCompletions.firstObject.copy;
-                if (self->pendingCommitCompletions.count)
+                    self->pendingCommits--;
+                    NSArray<void (^)(void)> *completions = self->pendingCommitCompletions.firstObject.copy;
+                    if (self->pendingCommitCompletions.count)
+                    {
+                        [self->pendingCommitCompletions removeObjectAtIndex:0];
+                    }
+
+                    if (self->deferredCommitRequested)
+                    {
+                        NSArray<void (^)(void)> *deferred = self->deferredCommitCompletions.copy;
+                        self->deferredCommitRequested = NO;
+                        self->deferredCommitCompletions = nil;
+                        [self commitWithCompletion:^{
+                            for (void (^callback)(void) in deferred) callback();
+                        }];
+                    }
+
+                    if (self.commitBackgroundTask.isRunning && self->pendingCommits == 0)
+                    {
+                        [self.commitBackgroundTask stop];
+                        self.commitBackgroundTask = nil;
+                    }
+                    else if (self.commitBackgroundTask.isRunning)
+                    {
+                        MXLogDebug(@"[MXFileStore commit] Background task %@ is kept - running since %.0fms", self.commitBackgroundTask, [[NSDate date] timeIntervalSinceDate:self->backgroundTaskStartDate] * 1000);
+                    }
+
+                    for (void (^completion)(void) in completions)
+                    {
+                        completion();
+                    }
+                };
+                if ([self.roomSummaryStore isKindOfClass:MXCoreDataRoomSummaryStore.class])
                 {
-                    [self->pendingCommitCompletions removeObjectAtIndex:0];
+                    [(MXCoreDataRoomSummaryStore *)self.roomSummaryStore flushWithCompletion:finishCommit];
                 }
-                
-                if (self.commitBackgroundTask.isRunning && self->pendingCommits == 0)
+                else
                 {
-                    [self.commitBackgroundTask stop];
-                    self.commitBackgroundTask = nil;
-                }
-                else if (self.commitBackgroundTask.isRunning)
-                {
-                    MXLogDebug(@"[MXFileStore commit] Background task %@ is kept - running since %.0fms", self.commitBackgroundTask, [[NSDate date] timeIntervalSinceDate:self->backgroundTaskStartDate] * 1000);
-                }
-                
-                for (void (^completion)(void) in completions)
-                {
-                    completion();
+                    finishCommit();
                 }
             });
         });
@@ -1976,9 +2006,17 @@ static NSUInteger preloadOptions;
         [super setEventStreamToken:metaData.eventStreamToken];
         backupEventStreamToken = self.eventStreamToken;
     }
+    else if (metaData && MXSlidingSyncHasPersistedPosition(credentials))
+    {
+        // Sliding Sync intentionally never writes a classic /sync token.
+        // MXSession persists this account/device checkpoint only after the
+        // timeline store commit. Its absence from legacy metadata is valid.
+        // Do not copy the position into eventStreamToken: /sync cannot use it.
+        MXLogDebug(@"[MXFileStore] loadMetaData: retaining Sliding Sync store (committed position present)");
+    }
     else
     {
-        MXLogDebug(@"[MXFileStore] loadMetaData: event stream token is missing");
+        MXLogDebug(@"[MXFileStore] loadMetaData: sync checkpoint missing or invalid metadata; clear=%@", enableClearData ? @"YES" : @"NO");
         [self logFiles];
         if (enableClearData)
         {

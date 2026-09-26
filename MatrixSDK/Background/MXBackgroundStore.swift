@@ -156,6 +156,13 @@ class MXBackgroundStore: NSObject, MXStore {
     func hasReachedHomeServerPaginationEnd(forRoom roomId: String) -> Bool {
         return true
     }
+
+    func storeBackwardPaginationState(forRoom roomId: String, state: MXRoomBackwardPaginationState) {
+    }
+
+    func backwardPaginationState(forRoom roomId: String) -> MXRoomBackwardPaginationState {
+        return .exhausted
+    }
     
     func storeHasLoadedAllRoomMembers(forRoom roomId: String, andValue value: Bool) {
     }

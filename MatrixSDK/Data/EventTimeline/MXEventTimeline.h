@@ -83,6 +83,10 @@ typedef void (^MXOnRoomEvent)(MXEvent *event, MXTimelineDirection direction, MXR
  */
 @property (nonatomic, nullable, copy) MXRoomEventFilter *roomEventFilter;
 
+/** Optional HTTP attempt limit for pagination on this timeline. Nil preserves
+ the transport default. Set before pagination; copies inherit the value. */
+@property (nonatomic, nullable, copy) NSNumber *paginationMaxNumberOfTries;
+
 /**
  The state of the room at the top most recent event of the timeline.
  */
@@ -123,6 +127,8 @@ typedef void (^MXOnRoomEvent)(MXEvent *event, MXTimelineDirection direction, MXR
 /**
  Reset the pagination so that future calls to paginate start from the most recent
  event of the timeline.
+
+ For room timelines, also cancels pending pagination operations on this instance.
  */
 - (void)resetPagination;
 
@@ -146,6 +152,13 @@ typedef void (^MXOnRoomEvent)(MXEvent *event, MXTimelineDirection direction, MXR
  The retrieved events will be sent to registered listeners.
  
  Note it is not possible to paginate forwards on a live timeline.
+
+ Room timelines check cancellation again after asynchronous decryption, before
+ applying the page. A cancelled operation reports NSURLErrorCancelled through
+ failure when its pending callback resumes. Resetting or destroying the timeline
+ cancels pending pages; a room history flush also cancels pages on copies which
+ share the session store. Changes already applied before cancellation are not
+ rolled back.
 
  @param numItems the number of items to get.
  @param direction `MXTimelineDirectionForwards` or `MXTimelineDirectionBackwards`

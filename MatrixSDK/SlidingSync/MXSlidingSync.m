@@ -3,6 +3,24 @@
 
 #import "MXSlidingSync.h"
 #import "MXSyncResponse.h"
+#import "MXRoomSync.h"
+#import "MXCredentials.h"
+
+NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentials)
+{
+    NSString *identity = [NSString stringWithFormat:@"%@|%@|%@",
+                          credentials.homeServer ?: @"",
+                          credentials.userId ?: @"",
+                          credentials.deviceId ?: @""];
+    return [@"MXSlidingSync." stringByAppendingString:identity];
+}
+
+BOOL MXSlidingSyncHasPersistedPosition(MXCredentials *credentials)
+{
+    NSDictionary *state = [NSUserDefaults.standardUserDefaults dictionaryForKey:MXSlidingSyncPersistenceKey(credentials)];
+    id position = state[@"position"];
+    return [position isKindOfClass:NSString.class] && [position length] > 0;
+}
 
 NSNotificationName const MXSessionRoomListStateDidChangeNotification = @"MXSessionRoomListStateDidChangeNotification";
 NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"MXSessionSlidingSyncRoomOrderDidChangeNotification";
@@ -152,6 +170,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     MXSlidingSyncList *model = [MXSlidingSyncList new];
     NSNumber *count;
     MXJSONModelSetNumber(count, json[@"count"]);
+    model.hasCount = [json[@"count"] isKindOfClass:NSNumber.class] && count.longLongValue >= 0;
     model.count = count.unsignedIntegerValue;
     NSArray *operationsJSON;
     MXJSONModelSetArray(operationsJSON, json[@"ops"]);
@@ -199,7 +218,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     return @{@"pos": self.position ?: @"", @"lists": lists, @"rooms": self.rooms ?: @{}, @"extensions": self.extensions ?: @{}};
 }
 
-static NSString *membershipForRoom(NSDictionary *room, NSString *userId)
+NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId)
 {
     if ([room[@"membership"] isKindOfClass:NSString.class]) return room[@"membership"];
     NSArray *state = room[@"required_state"];
@@ -222,7 +241,7 @@ static NSString *membershipForRoom(NSDictionary *room, NSString *userId)
     NSDictionary *typing = self.extensions[@"typing"][@"rooms"];
 
     [self.rooms enumerateKeysAndObjectsUsingBlock:^(NSString *roomId, NSDictionary *room, BOOL *stop) {
-        NSString *membership = membershipForRoom(room, userId);
+        NSString *membership = MXSlidingSyncMembershipForRoom(room, userId);
         if ([membership isEqual:@"invite"])
         {
             NSArray *events = room[@"invite_state"] ?: room[@"required_state"] ?: @[];
@@ -231,11 +250,19 @@ static NSString *membershipForRoom(NSDictionary *room, NSString *userId)
         }
         NSMutableDictionary *legacyRoom = [NSMutableDictionary dictionary];
         legacyRoom[@"state"] = @{@"events": room[@"required_state"] ?: @[]};
-        legacyRoom[@"timeline"] = @{
-            @"events": room[@"timeline"] ?: @[],
-            @"limited": room[@"limited"] ?: @NO,
-            @"prev_batch": room[@"prev_batch"] ?: @""
-        };
+        NSMutableDictionary *timeline = [@{@"events": room[@"timeline"] ?: @[]} mutableCopy];
+        id limited = room[@"limited"];
+        if ([limited isKindOfClass:NSNumber.class])
+        {
+            timeline[@"limited"] = limited;
+        }
+        id previousBatch = room[@"prev_batch"];
+        if ([previousBatch isKindOfClass:NSString.class])
+        {
+            timeline[@"prev_batch"] = previousBatch;
+        }
+        legacyRoom[@"timeline"] = timeline;
+        legacyRoom[MXRoomSyncSlidingSyncInitialJSONKey] = @([room[@"initial"] boolValue]);
         NSDictionary *unread = room[@"unread_notifications"];
         if (!unread && (room[@"notification_count"] || room[@"highlight_count"]))
             unread = @{@"notification_count": room[@"notification_count"] ?: @0,

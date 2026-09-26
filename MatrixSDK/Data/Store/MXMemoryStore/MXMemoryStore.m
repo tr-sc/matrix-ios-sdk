@@ -126,7 +126,7 @@
     MXMemoryRoomStore *roomStore = [self getOrCreateRoomStore:roomId];
     [roomStore removeAllMessages];
     roomStore.paginationToken = nil;
-    roomStore.hasReachedHomeServerPaginationEnd = NO;
+    roomStore.backwardPaginationState = MXRoomBackwardPaginationStateUnknown;
 }
 
 - (void)deleteRoom:(NSString *)roomId
@@ -164,14 +164,25 @@
 
 - (void)storeHasReachedHomeServerPaginationEndForRoom:(NSString*)roomId andValue:(BOOL)value
 {
-    MXMemoryRoomStore *roomStore = [self getOrCreateRoomStore:roomId];
-    roomStore.hasReachedHomeServerPaginationEnd = value;
+    [self storeBackwardPaginationStateForRoom:roomId
+                                        state:value ? MXRoomBackwardPaginationStateExhausted : MXRoomBackwardPaginationStateUnknown];
 }
 
 - (BOOL)hasReachedHomeServerPaginationEndForRoom:(NSString*)roomId
 {
+    return [self backwardPaginationStateForRoom:roomId] == MXRoomBackwardPaginationStateExhausted;
+}
+
+- (void)storeBackwardPaginationStateForRoom:(NSString *)roomId state:(MXRoomBackwardPaginationState)state
+{
     MXMemoryRoomStore *roomStore = [self getOrCreateRoomStore:roomId];
-    return roomStore.hasReachedHomeServerPaginationEnd;
+    roomStore.backwardPaginationState = state;
+}
+
+- (MXRoomBackwardPaginationState)backwardPaginationStateForRoom:(NSString *)roomId
+{
+    MXMemoryRoomStore *roomStore = [self getOrCreateRoomStore:roomId];
+    return roomStore.backwardPaginationState;
 }
 
 - (void)storeHasLoadedAllRoomMembersForRoom:(NSString *)roomId andValue:(BOOL)value

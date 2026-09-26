@@ -30,8 +30,8 @@
     // key: roomId, value: the unread highlighted count
     NSMutableDictionary<NSString*, NSNumber*> *highlightCounts;
 
-    // key: roomId, value: the bool value
-    NSMutableDictionary *hasReachedHomeServerPaginations;
+    // key: roomId, value: MXRoomBackwardPaginationState
+    NSMutableDictionary<NSString*, NSNumber*> *backwardPaginationStates;
 
     // key: roomId, value: the bool value
     NSMutableDictionary *hasLoadedAllRoomMembersForRooms;
@@ -68,7 +68,7 @@
         paginationTokens = [NSMutableDictionary dictionary];
         notificationCounts = [NSMutableDictionary dictionary];
         highlightCounts = [NSMutableDictionary dictionary];
-        hasReachedHomeServerPaginations = [NSMutableDictionary dictionary];
+        backwardPaginationStates = [NSMutableDictionary dictionary];
         hasLoadedAllRoomMembersForRooms = [NSMutableDictionary dictionary];
         lastMessages = [NSMutableDictionary dictionary];
         partialAttributedTextMessages = [NSMutableDictionary dictionary];
@@ -174,9 +174,9 @@
     {
         [highlightCounts removeObjectForKey:roomId];
     }
-    if (hasReachedHomeServerPaginations[roomId])
+    if (backwardPaginationStates[roomId])
     {
-        [hasReachedHomeServerPaginations removeObjectForKey:roomId];
+        [backwardPaginationStates removeObjectForKey:roomId];
     }
     if (hasLoadedAllRoomMembersForRooms[roomId])
     {
@@ -198,7 +198,7 @@
     [paginationTokens removeAllObjects];
     [notificationCounts removeAllObjects];
     [highlightCounts removeAllObjects];
-    [hasReachedHomeServerPaginations removeAllObjects];
+    [backwardPaginationStates removeAllObjects];
     [hasLoadedAllRoomMembersForRooms removeAllObjects];
     [lastMessages removeAllObjects];
     [partialAttributedTextMessages removeAllObjects];
@@ -216,20 +216,23 @@
 
 - (void)storeHasReachedHomeServerPaginationEndForRoom:(NSString*)roomId andValue:(BOOL)value
 {
-    hasReachedHomeServerPaginations[roomId] = [NSNumber numberWithBool:value];
+    [self storeBackwardPaginationStateForRoom:roomId
+                                        state:value ? MXRoomBackwardPaginationStateExhausted : MXRoomBackwardPaginationStateUnknown];
 }
 
 - (BOOL)hasReachedHomeServerPaginationEndForRoom:(NSString*)roomId
 {
-    BOOL hasReachedHomeServerPaginationEnd = NO;
+    return [self backwardPaginationStateForRoom:roomId] == MXRoomBackwardPaginationStateExhausted;
+}
 
-    NSNumber *hasReachedHomeServerPaginationEndNumber = hasReachedHomeServerPaginations[roomId];
-    if (hasReachedHomeServerPaginationEndNumber)
-    {
-        hasReachedHomeServerPaginationEnd = [hasReachedHomeServerPaginationEndNumber boolValue];
-    }
+- (void)storeBackwardPaginationStateForRoom:(NSString *)roomId state:(MXRoomBackwardPaginationState)state
+{
+    backwardPaginationStates[roomId] = @(state);
+}
 
-    return hasReachedHomeServerPaginationEnd;
+- (MXRoomBackwardPaginationState)backwardPaginationStateForRoom:(NSString *)roomId
+{
+    return (MXRoomBackwardPaginationState)[backwardPaginationStates[roomId] unsignedIntegerValue];
 }
 
 - (void)storeHasLoadedAllRoomMembersForRoom:(NSString *)roomId andValue:(BOOL)value
@@ -255,7 +258,7 @@
 {
     // As the back pagination is based on the HS back pagination API, reset data about it
     [paginationTokens removeObjectForKey:roomId];
-    [self storeHasReachedHomeServerPaginationEndForRoom:roomId andValue:NO];
+    [self storeBackwardPaginationStateForRoom:roomId state:MXRoomBackwardPaginationStateUnknown];
 
     // [MXStore messagesEnumeratorForRoom:] is used for pagination but the goal
     // of MXNoStore is to not store messages so that all paginations are made
@@ -534,7 +537,7 @@
     [paginationTokens removeAllObjects];
     [notificationCounts removeAllObjects];
     [highlightCounts removeAllObjects];
-    [hasReachedHomeServerPaginations removeAllObjects];
+    [backwardPaginationStates removeAllObjects];
     [lastMessages removeAllObjects];
     [partialAttributedTextMessages removeAllObjects];
     [users removeAllObjects];
