@@ -25,4 +25,13 @@
  */
 @interface MXFileRoomStore : MXMemoryRoomStore <NSCoding>
 
+/**
+ A frozen copy of the data `encodeWithCoder:` writes.
+
+ Call it on the thread that mutates the store (the main thread, where
+ [MXFileStore commit] runs): the copy is then archived on the file store queue
+ while the live store keeps changing.
+ */
+- (MXFileRoomStore *)archivingSnapshot;
+
 @end

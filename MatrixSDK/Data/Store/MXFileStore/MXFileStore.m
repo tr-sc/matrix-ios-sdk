@@ -1692,6 +1692,17 @@ static NSUInteger preloadOptions;
         NSArray *roomsToCommit = [[NSArray alloc] initWithArray:roomsToCommitForMessages copyItems:YES];
         [roomsToCommitForMessages removeAllObjects];
 
+        // Snapshot on this (the mutating) thread: the queue below must never read a live room store.
+        NSMutableDictionary<NSString *, MXFileRoomStore *> *snapshots = [NSMutableDictionary dictionaryWithCapacity:roomsToCommit.count];
+        for (NSString *roomId in roomsToCommit)
+        {
+            MXFileRoomStore *roomStore = (MXFileRoomStore *)roomStores[roomId];
+            if (roomStore)
+            {
+                snapshots[roomId] = [roomStore archivingSnapshot];
+            }
+        }
+
 #if DEBUG
         MXLogDebug(@"[MXFileStore commit] queuing saveRoomsMessages for %tu rooms", roomsToCommit.count);
 #endif
@@ -1706,7 +1717,7 @@ static NSUInteger preloadOptions;
             // Save rooms where there was changes
             for (NSString *roomId in roomsToCommit)
             {
-                MXFileRoomStore *roomStore = (MXFileRoomStore *)self->roomStores[roomId];
+                MXFileRoomStore *roomStore = snapshots[roomId];
                 if (roomStore)
                 {
                     NSString *file = [self messagesFileForRoom:roomId forBackup:NO];
