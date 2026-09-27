@@ -647,6 +647,7 @@
 		66AC9D26278CE627002E9B8F /* MXRefreshTokenData.m in Sources */ = {isa = PBXBuildFile; fileRef = 66AC9D22278CE626002E9B8F /* MXRefreshTokenData.m */; };
 		71DE22E01BC7C51200284153 /* MXReceiptData.m in Sources */ = {isa = PBXBuildFile; fileRef = 71DE22DC1BC7C51200284153 /* MXReceiptData.m */; };
 		71DE22E11BC7C51200284153 /* MXReceiptData.h in Headers */ = {isa = PBXBuildFile; fileRef = 71DE22DD1BC7C51200284153 /* MXReceiptData.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		7993CED2CD36EC6B08D10106 /* MXRealmAggregationsStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = CA0FF4602FD209B597CCF0F7 /* MXRealmAggregationsStoreTests.m */; };
 		8EC511042568216B00EC4E5B /* MXTaggedEventInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = 8EC511022568216B00EC4E5B /* MXTaggedEventInfo.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		8EC511052568216B00EC4E5B /* MXTaggedEventInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = 8EC511022568216B00EC4E5B /* MXTaggedEventInfo.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		8EC511062568216B00EC4E5B /* MXTaggedEventInfo.m in Sources */ = {isa = PBXBuildFile; fileRef = 8EC511032568216B00EC4E5B /* MXTaggedEventInfo.m */; };
@@ -681,6 +682,7 @@
 		A0A2397A295202930001F722 /* MXAggregatedPollsUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0A23978295202930001F722 /* MXAggregatedPollsUpdater.swift */; };
 		A0B1217F295306F700E704C2 /* MXAggregatedPollsUpdaterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B1217E295306F700E704C2 /* MXAggregatedPollsUpdaterTests.swift */; };
 		A0B12180295306F700E704C2 /* MXAggregatedPollsUpdaterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0B1217E295306F700E704C2 /* MXAggregatedPollsUpdaterTests.swift */; };
+		A36C281AC905C2A6F2A1C633 /* MXRealmAggregationsStoreTests.m in Sources */ = {isa = PBXBuildFile; fileRef = CA0FF4602FD209B597CCF0F7 /* MXRealmAggregationsStoreTests.m */; };
 		A71E55322CA6FEBD00B06B17 /* MXKeyBackupPassword.h in Headers */ = {isa = PBXBuildFile; fileRef = A71E55302CA6FEBC00B06B17 /* MXKeyBackupPassword.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		A71E55332CA6FEBD00B06B17 /* MXKeyBackupPassword.h in Headers */ = {isa = PBXBuildFile; fileRef = A71E55302CA6FEBC00B06B17 /* MXKeyBackupPassword.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		A71E55342CA6FEBD00B06B17 /* MXKeyBackupPassword.m in Sources */ = {isa = PBXBuildFile; fileRef = A71E55312CA6FEBC00B06B17 /* MXKeyBackupPassword.m */; };
@@ -2699,6 +2701,7 @@
 		C6F935861E5B3BE600FC34BF /* MXEvent.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MXEvent.swift; sourceTree = "<group>"; };
 		C6F935871E5B3BE600FC34BF /* MXJSONModels.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MXJSONModels.swift; sourceTree = "<group>"; };
 		C6FE1EEF1E65C4F7008587E4 /* MXAnalyticsDelegate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MXAnalyticsDelegate.h; sourceTree = "<group>"; };
+		CA0FF4602FD209B597CCF0F7 /* MXRealmAggregationsStoreTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = MXRealmAggregationsStoreTests.m; sourceTree = "<group>"; };
 		D6E6641895924FF16C6E5767 /* Pods-MatrixSDK-MatrixSDK-iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MatrixSDK-MatrixSDK-iOS.debug.xcconfig"; path = "Target Support Files/Pods-MatrixSDK-MatrixSDK-iOS/Pods-MatrixSDK-MatrixSDK-iOS.debug.xcconfig"; sourceTree = "<group>"; };
 		E4E572A32459F0F8110BBFAC /* Pods-MatrixSDKTests-macOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MatrixSDKTests-macOS.debug.xcconfig"; path = "Target Support Files/Pods-MatrixSDKTests-macOS/Pods-MatrixSDKTests-macOS.debug.xcconfig"; sourceTree = "<group>"; };
 		E5463BF2B60AC232D46943D5 /* Pods-MatrixSDK-MatrixSDK-macOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MatrixSDK-MatrixSDK-macOS.release.xcconfig"; path = "Target Support Files/Pods-MatrixSDK-MatrixSDK-macOS/Pods-MatrixSDK-MatrixSDK-macOS.release.xcconfig"; sourceTree = "<group>"; };
@@ -4215,6 +4218,7 @@
 				3298ABD42637FA3100E40B06 /* TestPlans */,
 				322985C526FA66FD001890BC /* Utils */,
 				0304DA06F5BAE6D7DBA8E7D3 /* MXSlidingSyncTests.m */,
+				CA0FF4602FD209B597CCF0F7 /* MXRealmAggregationsStoreTests.m */,
 			);
 			path = MatrixSDKTests;
 			sourceTree = "<group>";
@@ -7215,6 +7219,7 @@
 				32E226A91D081CE200E6CA54 /* MXPeekingRoomTests.m in Sources */,
 				EC383BBF2542F1E3002FBBE6 /* MXBackgroundSyncServiceTests.swift in Sources */,
 				64954043F1384782BBCBC319 /* MXSlidingSyncTests.m in Sources */,
+				7993CED2CD36EC6B08D10106 /* MXRealmAggregationsStoreTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -7848,6 +7853,7 @@
 				B1E09A362397FD7D0057C069 /* MXJSONModelTests.m in Sources */,
 				B1E09A192397FCE90057C069 /* MXReplyEventParserUnitTests.m in Sources */,
 				CEE276695DA48456C0556257 /* MXSlidingSyncTests.m in Sources */,
+				A36C281AC905C2A6F2A1C633 /* MXRealmAggregationsStoreTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

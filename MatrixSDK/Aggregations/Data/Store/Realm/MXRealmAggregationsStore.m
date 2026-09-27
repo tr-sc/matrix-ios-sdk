@@ -28,6 +28,8 @@
 
 @property (nonatomic) NSString *userId;
 @property (nonatomic) MXRealmAggregationsMapper *mapper;
+// Configuration is prepared once; Realm instances remain thread-confined.
+@property (nonatomic, strong) RLMRealmConfiguration *cachedRealmConfiguration;
 
 @end
 
@@ -239,17 +241,46 @@
 - (nullable RLMRealm*)realm
 {
     NSError *error;
-    RLMRealm *realm = [RLMRealm realmWithConfiguration:self.realmConfiguration error:&error];
+    RLMRealmConfiguration *configuration = self.realmConfiguration;
+    RLMRealm *realm = [RLMRealm realmWithConfiguration:configuration error:&error];
 
     if (error)
     {
         MXLogDebug(@"[MXRealmFileProvider] realmForUser gets error: %@", error);
+        // A removed directory or a transient open failure must be retryable.
+        @synchronized (self)
+        {
+            if (self.cachedRealmConfiguration == configuration)
+            {
+                self.cachedRealmConfiguration = nil;
+            }
+        }
     }
 
     return realm;
 }
 
 - (nonnull RLMRealmConfiguration*)realmConfiguration
+{
+    @synchronized (self)
+    {
+        if (!self.cachedRealmConfiguration)
+        {
+            NSError *error = nil;
+            RLMRealmConfiguration *configuration = [self prepareRealmConfigurationWithError:&error];
+            if (error)
+            {
+                // Preserve the existing open/error path, but retry preparation
+                // next time rather than keeping a configuration that failed.
+                return configuration;
+            }
+            self.cachedRealmConfiguration = configuration;
+        }
+        return self.cachedRealmConfiguration;
+    }
+}
+
+- (nonnull RLMRealmConfiguration*)prepareRealmConfigurationWithError:(NSError **)error
 {
     RLMRealmConfiguration *realmConfiguration = [RLMRealmConfiguration defaultConfiguration];
 
@@ -267,6 +298,7 @@
     if (folderCreationError)
     {
         MXLogDebug(@"[MXScanRealmFileProvider] Fail to create Realm folder %@ with error: %@", realmFileFolderURL, folderCreationError);
+        if (error) *error = folderCreationError;
     }
 
     realmConfiguration.fileURL = realmFileURL;

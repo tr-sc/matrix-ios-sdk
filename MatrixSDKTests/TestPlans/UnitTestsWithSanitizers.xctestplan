@@ -89,6 +89,7 @@
         "MXPushRuleUnitTests",
         "MXQRCodeDataUnitTests",
         "MXQRCodeTransactionV2UnitTests",
+        "MXRealmAggregationsStoreTests",
         "MXReplyEventParserUnitTests",
         "MXResponseUnitTests",
         "MXRoomEventDecryptionUnitTests",
