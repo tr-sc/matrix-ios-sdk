@@ -3815,7 +3815,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         // older sync response cannot take it back (see `unconfirmedDirectRoomsWrites`).
         [self->unconfirmedDirectRoomsWrites addObject:@{
             @"base": tmpDirectRooms ?: @{},
-            @"target": directRooms,
+            @"target": directRooms ?: @{},
             @"date": [NSDate date]
         }];
         // Rebased rather than assigned: sync may have changed m.direct while the PUT was in flight.
