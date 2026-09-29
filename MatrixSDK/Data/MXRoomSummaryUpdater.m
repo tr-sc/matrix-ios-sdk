@@ -295,7 +295,7 @@
         // In this case, the summary avatar would be the inviter avatar.
         // We need more information from the homeserver to solve it. The issue above should help to fix it
         // Note: we have this bug since day #1
-        updated = [self session:session updateRoomSummary:summary withServerRoomSummary:nil roomState:roomState];
+        updated |= [self session:session updateRoomSummary:summary withServerRoomSummary:nil roomState:roomState];
     }
 
     NSUInteger memberCount = roomState.membersCount.members;
@@ -312,7 +312,7 @@
 
     if (!summary.avatar)
     {
-        updated = [self updateSummaryAvatar:summary session:session withServerRoomSummary:nil roomState:roomState];
+        updated |= [self updateSummaryAvatar:summary session:session withServerRoomSummary:nil roomState:roomState];
     }
 
     return updated;
