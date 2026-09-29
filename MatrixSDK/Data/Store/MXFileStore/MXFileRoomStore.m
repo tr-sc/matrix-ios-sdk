@@ -76,15 +76,24 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
     return self;
 }
 
+- (MXFileRoomStore *)archivingSnapshot
+{
+    MXFileRoomStore *snapshot = [[MXFileRoomStore alloc] init];
+    snapshot->messages = [messages mutableCopy];
+    snapshot.paginationToken = self.paginationToken;
+    snapshot.backwardPaginationState = self.backwardPaginationState;
+    snapshot.hasLoadedAllRoomMembersForRoom = self.hasLoadedAllRoomMembersForRoom;
+    snapshot.partialAttributedTextMessage = self.partialAttributedTextMessage;
+    return snapshot;
+}
+
 - (void)encodeWithCoder:(NSCoder *)aCoder
 {
     // The goal of the NSCoding implementation here is to store room data to the file system during a [MXFileStore commit].
 
-    // Note this operation is  called from another thread.
-    // As the messages array continously grows, if some messages come while looping, they will not
-    // be serialised this time but they will be on the next [MXFileStore commit] that will be called for them.
-    // If messages come between [MXFileStore commit] and this method, more messages will be serialised. This is
-    // not a problem.
+    // This runs on the file store queue. [MXFileStore commit] archives an `archivingSnapshot` taken on
+    // the main thread, not the live store: copying `messages` here raced with the main thread mutating
+    // it (a limited sync clearing a room's timeline) and archived events that were already released.
     [aCoder encodeObject:[messages mutableCopy] forKey:@"messages"];
 
     if (self.paginationToken)

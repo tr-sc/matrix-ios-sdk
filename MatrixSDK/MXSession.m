@@ -1723,6 +1723,18 @@ typedef void (^MXOnResumeDone)(void);
 
 #pragma mark - Server sync
 
+// The server computes bump_stamp from the timeline the user can see, so an
+// invite never carries one. Without a stamp an invite never enters the order:
+// a full snapshot could never match the list count and every refresh was
+// rejected — a full snapshot of the whole list every 30 s for as long as one
+// invite was pending. Stamp 0 ranks it below every active room, where rooms
+// outside the order already sorted.
+static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *membership)
+{
+    if ([room[@"bump_stamp"] isKindOfClass:NSNumber.class]) return room[@"bump_stamp"];
+    return [membership isEqual:@"invite"] ? @0 : nil;
+}
+
 - (void)applySlidingSyncList:(MXSlidingSyncList *)list rooms:(NSDictionary<NSString *, NSDictionary *> *)responseRooms
 {
     NSUInteger previousLoaded = self.slidingSyncRoomOrder.count;
@@ -1742,8 +1754,9 @@ typedef void (^MXOnResumeDone)(void);
         NSMutableDictionary<NSString *, NSNumber *> *snapshot = [NSMutableDictionary dictionary];
         [responseRooms enumerateKeysAndObjectsUsingBlock:^(NSString *roomId, NSDictionary *room, BOOL *stop) {
             NSString *membership = MXSlidingSyncMembershipForRoom(room, self.myUserId ?: @"");
-            if (([membership isEqual:@"join"] || [membership isEqual:@"invite"])
-                && [room[@"bump_stamp"] isKindOfClass:NSNumber.class]) snapshot[roomId] = room[@"bump_stamp"];
+            if (![membership isEqual:@"join"] && ![membership isEqual:@"invite"]) return;
+            NSNumber *stamp = MXSlidingSyncBumpStampForRoom(room, membership);
+            if (stamp) snapshot[roomId] = stamp;
         }];
         if (list.operations.count || snapshot.count != list.count || self.slidingSyncRangeEnd + 1 < list.count)
         {
@@ -1818,11 +1831,14 @@ typedef void (^MXOnResumeDone)(void);
                 [excluded addObject:roomId];
                 return;
             }
-            NSNumber *stamp = room[@"bump_stamp"];
+            // A joined room without a stamp here just had nothing new to bump
+            // it — only an invite falls back to 0, and never over a stamp it has.
+            NSNumber *stamp = MXSlidingSyncBumpStampForRoom(room, membership);
             // A subscription can deliver a room outside the list. Only a
             // verified list snapshot may restore that subscribed room's rank.
             if ([excluded containsObject:roomId] && [self.slidingSyncSubscriptions containsObject:roomId]) return;
-            if ([stamp isKindOfClass:NSNumber.class]) self.slidingSyncBumpStamps[roomId] = stamp;
+            if ([room[@"bump_stamp"] isKindOfClass:NSNumber.class] || (stamp && !self.slidingSyncBumpStamps[roomId]))
+                self.slidingSyncBumpStamps[roomId] = stamp;
         }];
         NSArray<NSString *> *ranked = [self.slidingSyncBumpStamps keysSortedByValueUsingComparator:^NSComparisonResult(NSNumber *lhs, NSNumber *rhs) {
             return [rhs compare:lhs];
