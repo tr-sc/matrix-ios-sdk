@@ -19,6 +19,13 @@
 NS_ASSUME_NONNULL_BEGIN
 
 /**
+ SDK-internal JSON keys that carry the Sliding Sync server's hero and room avatars
+ while the response travels through the legacy sync pipeline.
+ */
+FOUNDATION_EXPORT NSString * const MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey;
+FOUNDATION_EXPORT NSString * const MXRoomSyncSummarySlidingSyncAvatarJSONKey;
+
+/**
  `MXRoomSyncSummary` represents the summary of a room.
  */
 @interface MXRoomSyncSummary : MXJSONModel
@@ -41,6 +48,19 @@ NS_ASSUME_NONNULL_BEGIN
  -1 means the information was not sent by the server.
  */
 @property (nonatomic) NSUInteger invitedMemberCount;
+
+/**
+ Avatars of the heroes as computed by a Sliding Sync server from the current room state:
+ user id -> mxc string, or NSNull when the hero has no avatar.
+ nil when the server did not send hero objects (legacy /sync).
+ */
+@property (nonatomic, nullable) NSDictionary<NSString*, id> *heroAvatars;
+
+/**
+ The room avatar computed by a Sliding Sync server (m.room.avatar, else the first hero's avatar).
+ nil when the server did not send it.
+ */
+@property (nonatomic, nullable) NSString *avatar;
 
 @end
 

@@ -637,8 +637,24 @@
         NSArray<NSString *> *filteredHeroes = [self filteredHeroesFromServerRoomSummary:serverRoomSummary excludingUserIDs:excludedUserIDs];
         if (filteredHeroes.count == 1)
         {
-            MXRoomMember *otherMember = [roomState.members memberWithUserId:filteredHeroes.firstObject];
-            avatar = otherMember.avatarUrl;
+            NSString *heroId = filteredHeroes.firstObject;
+            // Prefer the avatar the Sliding Sync server computed from the current state:
+            // the peer's member event in roomState may be stale when it fell into a
+            // limited timeline gap, and known members are never refreshed.
+            id serverAvatar = serverRoomSummary.heroAvatars[heroId];
+            if (!serverAvatar && serverRoomSummary.heroes.count == 1)
+            {
+                serverAvatar = serverRoomSummary.avatar;
+            }
+            if ([serverAvatar isKindOfClass:NSString.class])
+            {
+                avatar = serverAvatar;
+            }
+            else if (serverAvatar != NSNull.null)
+            {
+                MXRoomMember *otherMember = [roomState.members memberWithUserId:heroId];
+                avatar = otherMember.avatarUrl;
+            }
         }
         // Or in case of non lazy loading or no server room summary,
         // use the full room state
