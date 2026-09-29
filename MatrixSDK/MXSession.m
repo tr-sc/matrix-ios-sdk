@@ -96,6 +96,11 @@ NSString *const kMXSessionNoRoomTag = @"m.recent";  // Use the same value as mat
  */
 #define RETRY_SYNC_AFTER_MXERROR_MS 5000
 
+/**
+ Time before `joinPendingRoomInvites` retries an invite whose join failed.
+ */
+static const NSTimeInterval kMXSessionInviteJoinRetryInterval = 60;
+
 
 // Block called when MSSession resume is complete
 typedef void (^MXOnResumeDone)(void);
@@ -164,7 +169,15 @@ typedef void (^MXOnResumeDone)(void);
      or [MXSession uploadDirectRooms:])
      */
     NSMutableArray<dispatch_block_t> *directRoomsOperationsQueue;
-   
+
+    /**
+     Invites `joinPendingRoomInvites` is joining right now, and when a join last failed.
+     The sliding sync loop calls it after every response, several times a second while
+     the room list hydrates, and a join outlives many of those responses.
+     */
+    NSMutableSet<NSString*> *pendingInviteJoins;
+    NSMutableDictionary<NSString*, NSDate*> *failedInviteJoins;
+
     /**
      The current publicised groups list by userId dictionary.
      The key is the user id; the value, the list of the group ids that the user enabled in his profile.
@@ -270,6 +283,8 @@ typedef void (^MXOnResumeDone)(void);
         _applicationStateService = [MXUIKitApplicationStateService new];
 #endif
         directRoomsOperationsQueue = [NSMutableArray array];
+        pendingInviteJoins = [NSMutableSet set];
+        failedInviteJoins = [NSMutableDictionary dictionary];
         publicisedGroupsByUserId = [[NSMutableDictionary alloc] init];
         nativeToVirtualRoomIds = [NSMutableDictionary dictionary];
         asyncTaskQueue = [[MXAsyncTaskQueue alloc] initWithDispatchQueue:dispatch_get_main_queue() label:@"MXAsyncTaskQueue-MXSession"];
@@ -1531,6 +1546,8 @@ typedef void (^MXOnResumeDone)(void);
     // Flush pending direct room operations
     [directRoomsOperationsQueue removeAllObjects];
     directRoomsOperationsQueue = nil;
+    [pendingInviteJoins removeAllObjects];
+    [failedInviteJoins removeAllObjects];
 
     // Clean MXUsers
     for (MXUser *user in self.users)
@@ -2007,6 +2024,14 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                         self.slidingSyncConfiguration.extensions = extensions;
                     }
                     [self persistSlidingSyncState];
+
+                    // The legacy /sync loop accepts invites after every response; this loop never
+                    // did. With auto-accept on, the invites section is hidden and the TRSC chat list
+                    // shows joined rooms only, so an incoming DM stayed invisible and unjoined.
+                    if (MXSDKOptions.sharedInstance.autoAcceptRoomInvites)
+                    {
+                        [self joinPendingRoomInvites];
+                    }
 
                     NSUInteger total = self.slidingSyncTotalRoomCount;
                     if (self.slidingSyncConfiguration.backgroundHydrationEnabled && self.roomListReady && self.slidingSyncRangeEnd + 1 < total)
@@ -3328,24 +3353,99 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
 
 - (void)joinPendingRoomInvites
 {
-    NSArray<NSString *> *roomIds = [[self.invitedRooms valueForKey:@"roomId"] copy];
-    [roomIds enumerateObjectsUsingBlock:^(NSString * _Nonnull roomId, NSUInteger idx, BOOL * _Nonnull stop) {
+    NSArray<MXRoom *> *invites = [self.invitedRooms copy] ?: @[];
+    NSSet<NSString *> *inviteIds = [NSSet setWithArray:[invites valueForKey:@"roomId"] ?: @[]];
+
+    // Entries for rooms that are no longer invites are done with (joined, left, or the
+    // join success never came back from sync). Pruning keeps a later re-invite joinable.
+    [pendingInviteJoins intersectSet:inviteIds];
+    for (NSString *roomId in failedInviteJoins.allKeys)
+    {
+        if (![inviteIds containsObject:roomId])
+        {
+            [failedInviteJoins removeObjectForKey:roomId];
+        }
+    }
+
+    for (MXRoom *invite in invites)
+    {
+        NSString *roomId = invite.roomId;
+        if (!roomId || [pendingInviteJoins containsObject:roomId])
+        {
+            continue;
+        }
+
+        // A join is already on its way (maybe started by the user), or the invite is being declined.
+        switch (invite.summary.membershipTransitionState)
+        {
+            case MXMembershipTransitionStateJoining:
+            case MXMembershipTransitionStateJoined:
+            case MXMembershipTransitionStateLeaving:
+            case MXMembershipTransitionStateFailedLeaving:
+            case MXMembershipTransitionStateLeft:
+                continue;
+            default:
+                break;
+        }
+
+        NSDate *failedAt = failedInviteJoins[roomId];
+        if (failedAt && -failedAt.timeIntervalSinceNow < kMXSessionInviteJoinRetryInterval)
+        {
+            continue;
+        }
+
+        [pendingInviteJoins addObject:roomId];
         MXLogDebug(@"[MXSession] joinPendingRoomInvites: Auto-accepting room invite for %@", roomId)
-        [self joinRoom:roomId viaServers:nil success:^(MXRoom *room) {
-            MXLogDebug(@"[MXSession] joinPendingRoomInvites: Joined room: %@", roomId)
-        } failure:^(NSError *error) {
-            NSDictionary *details = @{
-                @"error": error ?: @"unknown",
-                @"room_id": roomId ?: @"unknown"
-            };
-            MXLogErrorDetails(@"[MXSession] joinPendingRoomInvites: Failed to join room", details);
-            
-            if (error.code == kMXRoomAlreadyJoinedErrorCode)
+
+        MXWeakify(self);
+        [invite state:^(MXRoomState *roomState) {
+            MXStrongifyAndReturnIfNil(self);
+
+            // Read before the join: it replaces my member event and the is_direct flag goes with it.
+            MXRoomMember *myMember = [roomState.members memberWithUserId:self.myUserId];
+            NSString *directInviter;
+            id isDirect = myMember.originalEvent.content[@"is_direct"];
+            if ([isDirect isKindOfClass:NSNumber.class] && [isDirect boolValue]
+                && myMember.originalEvent.sender.length
+                && ![myMember.originalEvent.sender isEqualToString:self.myUserId])
             {
-                [self removeInvitedRoomById:roomId];
+                directInviter = myMember.originalEvent.sender;
             }
+
+            [self joinRoom:roomId viaServers:nil success:^(MXRoom *room) {
+                MXStrongifyAndReturnIfNil(self);
+                MXLogDebug(@"[MXSession] joinPendingRoomInvites: Joined room: %@", roomId)
+                [self->pendingInviteJoins removeObject:roomId];
+                [self->failedInviteJoins removeObjectForKey:roomId];
+
+                // handleInviteDirectFlag tags a DM invite only when this device sees the invite in
+                // sync, once and without retry. The joined room then looks like a group here.
+                if (directInviter && !room.isDirect)
+                {
+                    [room setIsDirect:YES withUserId:directInviter success:nil failure:^(NSError *error) {
+                        MXLogDebug(@"[MXSession] joinPendingRoomInvites: Failed to tag %@ as a direct chat", roomId);
+                    }];
+                }
+            } failure:^(NSError *error) {
+                MXStrongifyAndReturnIfNil(self);
+                NSDictionary *details = @{
+                    @"error": error ?: @"unknown",
+                    @"room_id": roomId ?: @"unknown"
+                };
+                MXLogErrorDetails(@"[MXSession] joinPendingRoomInvites: Failed to join room", details);
+                [self->pendingInviteJoins removeObject:roomId];
+
+                if (error.code == kMXRoomAlreadyJoinedErrorCode)
+                {
+                    [self removeInvitedRoomById:roomId];
+                }
+                else
+                {
+                    self->failedInviteJoins[roomId] = [NSDate date];
+                }
+            }];
         }];
-    }];
+    }
 }
 
 - (BOOL)isJoinedOnRoom:(NSString *)roomIdOrAlias
