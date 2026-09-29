@@ -96,6 +96,17 @@ NSString *const kMXSessionNoRoomTag = @"m.recent";  // Use the same value as mat
  */
 #define RETRY_SYNC_AFTER_MXERROR_MS 5000
 
+/**
+ Time before `joinPendingRoomInvites` retries an invite whose join failed.
+ */
+static const NSTimeInterval kMXSessionInviteJoinRetryInterval = 60;
+
+/**
+ How long an acknowledged m.direct write is replayed over synced m.direct while
+ its echo has not come back. After that the synced value wins.
+ */
+static const NSTimeInterval kMXSessionDirectRoomsEchoTimeout = 60;
+
 
 // Block called when MSSession resume is complete
 typedef void (^MXOnResumeDone)(void);
@@ -164,7 +175,25 @@ typedef void (^MXOnResumeDone)(void);
      or [MXSession uploadDirectRooms:])
      */
     NSMutableArray<dispatch_block_t> *directRoomsOperationsQueue;
-   
+
+    /**
+     m.direct as the last sync delivered it, and our m.direct writes the homeserver
+     acknowledged but sync has not echoed yet (@{base, target, date}).
+     `directRooms` is the first with the second replayed on top: an older sync
+     response arriving after our PUT would otherwise drop what we just wrote,
+     and the next queued operation would PUT the loss back to the server.
+     */
+    NSDictionary<NSString*, NSArray<NSString*>*> *syncedDirectRooms;
+    NSMutableArray<NSDictionary*> *unconfirmedDirectRoomsWrites;
+
+    /**
+     Invites `joinPendingRoomInvites` is joining right now, and when a join last failed.
+     The sliding sync loop calls it after every response, several times a second while
+     the room list hydrates, and a join outlives many of those responses.
+     */
+    NSMutableSet<NSString*> *pendingInviteJoins;
+    NSMutableDictionary<NSString*, NSDate*> *failedInviteJoins;
+
     /**
      The current publicised groups list by userId dictionary.
      The key is the user id; the value, the list of the group ids that the user enabled in his profile.
@@ -270,6 +299,9 @@ typedef void (^MXOnResumeDone)(void);
         _applicationStateService = [MXUIKitApplicationStateService new];
 #endif
         directRoomsOperationsQueue = [NSMutableArray array];
+        unconfirmedDirectRoomsWrites = [NSMutableArray array];
+        pendingInviteJoins = [NSMutableSet set];
+        failedInviteJoins = [NSMutableDictionary dictionary];
         publicisedGroupsByUserId = [[NSMutableDictionary alloc] init];
         nativeToVirtualRoomIds = [NSMutableDictionary dictionary];
         asyncTaskQueue = [[MXAsyncTaskQueue alloc] initWithDispatchQueue:dispatch_get_main_queue() label:@"MXAsyncTaskQueue-MXSession"];
@@ -1531,6 +1563,9 @@ typedef void (^MXOnResumeDone)(void);
     // Flush pending direct room operations
     [directRoomsOperationsQueue removeAllObjects];
     directRoomsOperationsQueue = nil;
+    [unconfirmedDirectRoomsWrites removeAllObjects];
+    [pendingInviteJoins removeAllObjects];
+    [failedInviteJoins removeAllObjects];
 
     // Clean MXUsers
     for (MXUser *user in self.users)
@@ -2007,6 +2042,14 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                         self.slidingSyncConfiguration.extensions = extensions;
                     }
                     [self persistSlidingSyncState];
+
+                    // The legacy /sync loop accepts invites after every response; this loop never
+                    // did. With auto-accept on, the invites section is hidden and the TRSC chat list
+                    // shows joined rooms only, so an incoming DM stayed invisible and unjoined.
+                    if (MXSDKOptions.sharedInstance.autoAcceptRoomInvites)
+                    {
+                        [self joinPendingRoomInvites];
+                    }
 
                     NSUInteger total = self.slidingSyncTotalRoomCount;
                     if (self.slidingSyncConfiguration.backgroundHydrationEnabled && self.roomListReady && self.slidingSyncRangeEnd + 1 < total)
@@ -2582,28 +2625,16 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                 NSDictionary<NSString*, NSArray<NSString*>*> *directRooms;
                 MXJSONModelSetDictionary(directRooms, event[@"content"]);
 
-                NSDictionary<NSString*, NSArray<NSString*>*> *tmpDirectRooms = self.directRooms;
-                
-                if (directRooms != tmpDirectRooms
-                    && ![directRooms isEqualToDictionary:tmpDirectRooms])
+                syncedDirectRooms = directRooms;
+
+                // The echo of our latest write confirms the earlier ones as well.
+                NSDictionary *latestWrite = unconfirmedDirectRoomsWrites.lastObject[@"target"];
+                if (latestWrite && [latestWrite isEqualToDictionary:directRooms ?: @{}])
                 {
-                    // Collect previous direct rooms ids
-                    NSMutableSet<NSString*> *directRoomIds = [NSMutableSet set];
-                    [directRoomIds unionSet:[self directRoomIds]];
-
-                    self.directRooms = directRooms;
-
-                    // And collect current ones
-                    [directRoomIds unionSet:[self directRoomIds]];
-
-                    // In order to update room summaries
-                    [self updateSummaryDirectUserIdForRooms:directRoomIds];
-
-                    // Update the information of the direct rooms.
-                    [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionDirectRoomsDidChangeNotification
-                                                                        object:self
-                                                                      userInfo:nil];
+                    [unconfirmedDirectRoomsWrites removeAllObjects];
                 }
+
+                [self applyDirectRooms:[self directRoomsReplayingUnconfirmedWritesOnto:directRooms]];
             }
 
             // Update the corresponding part of account data
@@ -2669,6 +2700,106 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                                                               userInfo:nil];
         }
     }
+}
+
+/**
+ Replace the local m.direct copy, refresh the summaries of the rooms it touches
+ and post `kMXSessionDirectRoomsDidChangeNotification`. No-op when nothing changed.
+ */
+- (void)applyDirectRooms:(NSDictionary<NSString*, NSArray<NSString*>*> *)directRooms
+{
+    NSDictionary<NSString*, NSArray<NSString*>*> *tmpDirectRooms = self.directRooms;
+
+    if (directRooms != tmpDirectRooms
+        && ![directRooms isEqualToDictionary:tmpDirectRooms])
+    {
+        // Collect previous direct rooms ids
+        NSMutableSet<NSString*> *directRoomIds = [NSMutableSet set];
+        [directRoomIds unionSet:[self directRoomIds]];
+
+        self.directRooms = directRooms;
+
+        // And collect current ones
+        [directRoomIds unionSet:[self directRoomIds]];
+
+        // In order to update room summaries
+        [self updateSummaryDirectUserIdForRooms:directRoomIds];
+
+        // Update the information of the direct rooms.
+        [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionDirectRoomsDidChangeNotification
+                                                            object:self
+                                                          userInfo:nil];
+    }
+}
+
+- (NSDictionary<NSString*, NSArray<NSString*>*> *)directRoomsReplayingUnconfirmedWritesOnto:(NSDictionary<NSString*, NSArray<NSString*>*> *)directRooms
+{
+    NSDate *now = [NSDate date];
+    [unconfirmedDirectRoomsWrites filterUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *write, NSDictionary *bindings) {
+        return [now timeIntervalSinceDate:write[@"date"]] < kMXSessionDirectRoomsEchoTimeout;
+    }]];
+
+    NSDictionary<NSString*, NSArray<NSString*>*> *result = directRooms;
+    for (NSDictionary *write in unconfirmedDirectRoomsWrites)
+    {
+        result = [MXSession directRooms:write[@"target"] rebasedFrom:write[@"base"] onto:result];
+    }
+    return result;
+}
+
+/**
+ Replay the change from `base` to `target` onto `latest`: room ids `target` added
+ under a user are added there, room ids it dropped are removed, and every other
+ entry of `latest` stays as it is.
+ */
++ (NSDictionary<NSString*, NSArray<NSString*>*> *)directRooms:(NSDictionary<NSString*, NSArray<NSString*>*> *)target
+                                                 rebasedFrom:(NSDictionary<NSString*, NSArray<NSString*>*> *)base
+                                                        onto:(NSDictionary<NSString*, NSArray<NSString*>*> *)latest
+{
+    if (base == latest || [base isEqualToDictionary:latest])
+    {
+        return target;
+    }
+
+    NSMutableDictionary<NSString*, NSArray<NSString*>*> *result = [NSMutableDictionary dictionaryWithDictionary:latest ?: @{}];
+    NSMutableSet<NSString*> *userIds = [NSMutableSet setWithArray:base.allKeys ?: @[]];
+    [userIds addObjectsFromArray:target.allKeys ?: @[]];
+
+    for (NSString *userId in userIds)
+    {
+        NSArray *before = [base[userId] isKindOfClass:NSArray.class] ? base[userId] : @[];
+        NSArray *after = [target[userId] isKindOfClass:NSArray.class] ? target[userId] : @[];
+        if ([before isEqualToArray:after])
+        {
+            continue;
+        }
+
+        NSMutableArray *roomIds = [result[userId] isKindOfClass:NSArray.class] ? [result[userId] mutableCopy] : [NSMutableArray array];
+        for (NSString *roomId in before)
+        {
+            if (![after containsObject:roomId])
+            {
+                [roomIds removeObject:roomId];
+            }
+        }
+        for (NSString *roomId in after)
+        {
+            if (![before containsObject:roomId] && ![roomIds containsObject:roomId])
+            {
+                [roomIds addObject:roomId];
+            }
+        }
+
+        if (roomIds.count)
+        {
+            result[userId] = roomIds;
+        }
+        else
+        {
+            [result removeObjectForKey:userId];
+        }
+    }
+    return result;
 }
 
 - (void)updateSummaryDirectUserIdForRooms:(NSSet<NSString*> *)roomIds
@@ -3328,24 +3459,99 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
 
 - (void)joinPendingRoomInvites
 {
-    NSArray<NSString *> *roomIds = [[self.invitedRooms valueForKey:@"roomId"] copy];
-    [roomIds enumerateObjectsUsingBlock:^(NSString * _Nonnull roomId, NSUInteger idx, BOOL * _Nonnull stop) {
+    NSArray<MXRoom *> *invites = [self.invitedRooms copy] ?: @[];
+    NSSet<NSString *> *inviteIds = [NSSet setWithArray:[invites valueForKey:@"roomId"] ?: @[]];
+
+    // Entries for rooms that are no longer invites are done with (joined, left, or the
+    // join success never came back from sync). Pruning keeps a later re-invite joinable.
+    [pendingInviteJoins intersectSet:inviteIds];
+    for (NSString *roomId in failedInviteJoins.allKeys)
+    {
+        if (![inviteIds containsObject:roomId])
+        {
+            [failedInviteJoins removeObjectForKey:roomId];
+        }
+    }
+
+    for (MXRoom *invite in invites)
+    {
+        NSString *roomId = invite.roomId;
+        if (!roomId || [pendingInviteJoins containsObject:roomId])
+        {
+            continue;
+        }
+
+        // A join is already on its way (maybe started by the user), or the invite is being declined.
+        switch (invite.summary.membershipTransitionState)
+        {
+            case MXMembershipTransitionStateJoining:
+            case MXMembershipTransitionStateJoined:
+            case MXMembershipTransitionStateLeaving:
+            case MXMembershipTransitionStateFailedLeaving:
+            case MXMembershipTransitionStateLeft:
+                continue;
+            default:
+                break;
+        }
+
+        NSDate *failedAt = failedInviteJoins[roomId];
+        if (failedAt && -failedAt.timeIntervalSinceNow < kMXSessionInviteJoinRetryInterval)
+        {
+            continue;
+        }
+
+        [pendingInviteJoins addObject:roomId];
         MXLogDebug(@"[MXSession] joinPendingRoomInvites: Auto-accepting room invite for %@", roomId)
-        [self joinRoom:roomId viaServers:nil success:^(MXRoom *room) {
-            MXLogDebug(@"[MXSession] joinPendingRoomInvites: Joined room: %@", roomId)
-        } failure:^(NSError *error) {
-            NSDictionary *details = @{
-                @"error": error ?: @"unknown",
-                @"room_id": roomId ?: @"unknown"
-            };
-            MXLogErrorDetails(@"[MXSession] joinPendingRoomInvites: Failed to join room", details);
-            
-            if (error.code == kMXRoomAlreadyJoinedErrorCode)
+
+        MXWeakify(self);
+        [invite state:^(MXRoomState *roomState) {
+            MXStrongifyAndReturnIfNil(self);
+
+            // Read before the join: it replaces my member event and the is_direct flag goes with it.
+            MXRoomMember *myMember = [roomState.members memberWithUserId:self.myUserId];
+            NSString *directInviter;
+            id isDirect = myMember.originalEvent.content[@"is_direct"];
+            if ([isDirect isKindOfClass:NSNumber.class] && [isDirect boolValue]
+                && myMember.originalEvent.sender.length
+                && ![myMember.originalEvent.sender isEqualToString:self.myUserId])
             {
-                [self removeInvitedRoomById:roomId];
+                directInviter = myMember.originalEvent.sender;
             }
+
+            [self joinRoom:roomId viaServers:nil success:^(MXRoom *room) {
+                MXStrongifyAndReturnIfNil(self);
+                MXLogDebug(@"[MXSession] joinPendingRoomInvites: Joined room: %@", roomId)
+                [self->pendingInviteJoins removeObject:roomId];
+                [self->failedInviteJoins removeObjectForKey:roomId];
+
+                // handleInviteDirectFlag tags a DM invite only when this device sees the invite in
+                // sync, once and without retry. The joined room then looks like a group here.
+                if (directInviter && !room.isDirect)
+                {
+                    [room setIsDirect:YES withUserId:directInviter success:nil failure:^(NSError *error) {
+                        MXLogDebug(@"[MXSession] joinPendingRoomInvites: Failed to tag %@ as a direct chat", roomId);
+                    }];
+                }
+            } failure:^(NSError *error) {
+                MXStrongifyAndReturnIfNil(self);
+                NSDictionary *details = @{
+                    @"error": error ?: @"unknown",
+                    @"room_id": roomId ?: @"unknown"
+                };
+                MXLogErrorDetails(@"[MXSession] joinPendingRoomInvites: Failed to join room", details);
+                [self->pendingInviteJoins removeObject:roomId];
+
+                if (error.code == kMXRoomAlreadyJoinedErrorCode)
+                {
+                    [self removeInvitedRoomById:roomId];
+                }
+                else
+                {
+                    self->failedInviteJoins[roomId] = [NSDate date];
+                }
+            }];
         }];
-    }];
+    }
 }
 
 - (BOOL)isJoinedOnRoom:(NSString *)roomIdOrAlias
@@ -3558,11 +3764,17 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
 {
     MXHTTPOperation *operation = [MXHTTPOperation new];
 
+    // The caller built `directRooms` from the m.direct it saw now. By the time the queue runs
+    // it, sync or an earlier operation may have changed m.direct: replay only the caller's own
+    // change onto the latest copy instead of putting a stale dictionary over it.
+    NSDictionary<NSString*, NSArray<NSString*>*> *base = self.directRooms;
+
     MXWeakify(self);
     [self runOrQueueDirectRoomOperation:^{
         MXStrongifyAndReturnIfNil(self);
 
-        MXHTTPOperation *operation2 = [self uploadDirectRoomsInOperationsQueue:directRooms success:success failure:failure];
+        NSDictionary<NSString*, NSArray<NSString*>*> *latest = [MXSession directRooms:directRooms rebasedFrom:base onto:self.directRooms];
+        MXHTTPOperation *operation2 = [self uploadDirectRoomsInOperationsQueue:latest success:success failure:failure];
         [operation mutateTo:operation2];
     }];
 
@@ -3575,9 +3787,11 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
 {
     NSDictionary<NSString*, NSArray<NSString*>*> *tmpDirectRooms = self.directRooms;
 
-    // If there is no change, do nothing
-    if (tmpDirectRooms == directRooms
-        || [tmpDirectRooms isEqualToDictionary:directRooms]
+    // If there is no change, do nothing. Compared with the synced copy too: a local value
+    // that only replays our own unconfirmed write is not proof the server holds it.
+    BOOL sameAsLocal = (tmpDirectRooms == directRooms || [tmpDirectRooms isEqualToDictionary:directRooms]);
+    BOOL sameAsSynced = (syncedDirectRooms == directRooms || [syncedDirectRooms isEqualToDictionary:directRooms]);
+    if ((sameAsLocal && sameAsSynced)
         || (tmpDirectRooms == nil && directRooms.count == 0))
     {
         if (success)
@@ -3589,33 +3803,39 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         return nil;
     }
 
-    // Wait that the response comes back down the event stream
+    // Finish on the PUT's own success. This used to wait for an m.direct exactly equal to
+    // `directRooms` to come back down the event stream, with no timeout: any other write in
+    // between (a second device, Android, the server) meant it never came, the queue stalled
+    // until relaunch, and every later DM tag waited behind it without an error.
     MXWeakify(self);
-    __block id directRoomsDidChangeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:kMXSessionDirectRoomsDidChangeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
+    return [self setAccountData:directRooms forType:kMXAccountDataTypeDirect success:^{
         MXStrongifyAndReturnIfNil(self);
 
-        if ([self.directRooms isEqualToDictionary:directRooms])
+        // The homeserver holds `directRooms` now. Keep the write until sync echoes it, so an
+        // older sync response cannot take it back (see `unconfirmedDirectRoomsWrites`).
+        [self->unconfirmedDirectRoomsWrites addObject:@{
+            @"base": tmpDirectRooms ?: @{},
+            @"target": directRooms ?: @{},
+            @"date": [NSDate date]
+        }];
+        // Rebased rather than assigned: sync may have changed m.direct while the PUT was in flight.
+        [self applyDirectRooms:[MXSession directRooms:directRooms rebasedFrom:tmpDirectRooms onto:self.directRooms]];
+        self.store.userAccountData = self->_accountData.accountData;
+
+        if (success)
         {
-            [[NSNotificationCenter defaultCenter] removeObserver:directRoomsDidChangeObserver];
-
-            if (success)
-            {
-                success();
-            }
-
-            [self runNextDirectRoomOperation];
+            success();
         }
-    }];
 
-    // Push the current direct rooms dictionary to the homeserver
-    return [self setAccountData:directRooms forType:kMXAccountDataTypeDirect success:nil failure:^(NSError *error) {
+        [self runNextDirectRoomOperation];
+    } failure:^(NSError *error) {
         MXStrongifyAndReturnIfNil(self);
 
         if (failure)
         {
             failure(error);
         }
-        
+
         [self runNextDirectRoomOperation];
     }];
 }
