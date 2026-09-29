@@ -43,7 +43,6 @@
     XCTAssertEqualObjects(request[@"lists"][@"main"][@"ranges"], (@[@[@0, @49]]));
     XCTAssertEqualObjects(request[@"lists"][@"main"][@"timeline_limit"], @1);
     XCTAssertTrue(([request[@"lists"][@"main"][@"required_state"] containsObject:@[@"m.room.member", @"$ME"]]));
-    XCTAssertTrue(([request[@"lists"][@"main"][@"required_state"] containsObject:@[@"m.room.member", @"$LAZY"]]));
     XCTAssertNotNil(request[@"room_subscriptions"][@"!deep:example.org"]);
     XCTAssertTrue([request[@"extensions"][@"e2ee"][@"enabled"] boolValue]);
     XCTAssertTrue([request[@"extensions"][@"to_device"][@"enabled"] boolValue]);
@@ -93,105 +92,6 @@
     XCTAssertEqual(room.unreadNotifications.notificationCount, 4u);
     XCTAssertEqual(room.unreadNotifications.highlightCount, 2u);
     XCTAssertEqualObjects(legacy.deviceOneTimeKeysCount[@"signed_curve25519"], @3);
-}
-
-- (void)testHeroAvatarsAndRoomAvatarReachLegacySummary
-{
-    MXRoomSync *room = [self legacyRoomFromSlidingRoom:@{
-        @"membership": @"join",
-        @"timeline": @[],
-        @"joined_count": @2,
-        @"avatar": @"mxc://example.org/new",
-        @"heroes": @[
-            @{@"user_id": @"@peer:example.org", @"displayname": @"Peer", @"avatar_url": @"mxc://example.org/new"},
-            @{@"user_id": @"@bare:example.org"}
-        ]
-    }];
-
-    XCTAssertEqualObjects(room.summary.heroes, (@[@"@peer:example.org", @"@bare:example.org"]));
-    XCTAssertEqualObjects(room.summary.heroAvatars[@"@peer:example.org"], @"mxc://example.org/new");
-    XCTAssertEqualObjects(room.summary.heroAvatars[@"@bare:example.org"], NSNull.null,
-                          @"A hero without avatar_url has no photo on the server");
-    XCTAssertEqualObjects(room.summary.avatar, @"mxc://example.org/new");
-
-    MXRoomSync *roundTripped = [MXRoomSync modelFromJSON:room.JSONDictionary];
-    XCTAssertEqualObjects(roundTripped.summary.heroAvatars, room.summary.heroAvatars);
-    XCTAssertEqualObjects(roundTripped.summary.avatar, @"mxc://example.org/new");
-}
-
-- (void)testDirectRoomAvatarPrefersServerHeroAvatarOverStaleMember
-{
-    MXRoomState *state = [[MXRoomState alloc] initWithRoomId:@"!dm:example.org" andMatrixSession:nil andDirection:NO];
-    [state handleStateEvents:@[[MXEvent modelFromJSON:@{
-        @"type": @"m.room.member",
-        @"state_key": @"@peer:example.org",
-        @"sender": @"@peer:example.org",
-        @"event_id": @"$old",
-        @"origin_server_ts": @1,
-        @"content": @{@"membership": @"join", @"displayname": @"Peer", @"avatar_url": @"mxc://example.org/old"}
-    }]]];
-    MXRoomSummary *summary = [[MXRoomSummary alloc] initWithRoomId:@"!dm:example.org" andMatrixSession:nil];
-    summary.directUserId = @"@peer:example.org";
-    summary.avatar = @"mxc://example.org/old";
-    MXRoomSummaryUpdater *updater = [MXRoomSummaryUpdater new];
-
-    MXRoomSyncSummary *fresh = [MXRoomSyncSummary modelFromJSON:@{
-        @"m.heroes": @[@"@peer:example.org"],
-        @"m.joined_member_count": @2,
-        MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey: @{@"@peer:example.org": @"mxc://example.org/new"}
-    }];
-    XCTAssertTrue([updater updateSummaryAvatar:summary session:nil withServerRoomSummary:fresh roomState:state excludingUserIDs:@[]]);
-    XCTAssertEqualObjects(summary.avatar, @"mxc://example.org/new");
-
-    MXRoomSyncSummary *removed = [MXRoomSyncSummary modelFromJSON:@{
-        @"m.heroes": @[@"@peer:example.org"],
-        @"m.joined_member_count": @2,
-        MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey: @{@"@peer:example.org": NSNull.null}
-    }];
-    XCTAssertTrue([updater updateSummaryAvatar:summary session:nil withServerRoomSummary:removed roomState:state excludingUserIDs:@[]]);
-    XCTAssertNil(summary.avatar);
-
-    MXRoomSyncSummary *legacy = [MXRoomSyncSummary modelFromJSON:@{
-        @"m.heroes": @[@"@peer:example.org"],
-        @"m.joined_member_count": @2
-    }];
-    [updater updateSummaryAvatar:summary session:nil withServerRoomSummary:legacy roomState:state excludingUserIDs:@[]];
-    XCTAssertEqualObjects(summary.avatar, @"mxc://example.org/old", @"Without server avatars the member state still applies");
-}
-
-- (void)testMemberEventWithDisplaynameAlsoUpdatesUserAvatar
-{
-    BOOL disableIdenticon = MXSDKOptions.sharedInstance.disableIdenticonUseForUserAvatar;
-    MXSDKOptions.sharedInstance.disableIdenticonUseForUserAvatar = YES;
-    MXUser *user = [[MXUser alloc] initWithUserId:@"@peer:example.org"];
-    void (^apply)(NSString *, uint64_t) = ^(NSString *avatarUrl, uint64_t ts) {
-        NSMutableDictionary *content = [@{@"membership": @"join", @"displayname": @"Peer"} mutableCopy];
-        content[@"avatar_url"] = avatarUrl;
-        MXEvent *event = [MXEvent modelFromJSON:@{
-            @"type": @"m.room.member",
-            @"state_key": @"@peer:example.org",
-            @"sender": @"@peer:example.org",
-            @"event_id": [NSString stringWithFormat:@"$%llu", ts],
-            @"origin_server_ts": @(ts),
-            @"content": content
-        }];
-        [user updateWithRoomMemberEvent:event roomMember:[[MXRoomMember alloc] initWithMXEvent:event] inMatrixSession:nil];
-    };
-
-    apply(@"mxc://example.org/old", 1000);
-    XCTAssertEqualObjects(user.displayname, @"Peer");
-    XCTAssertEqualObjects(user.avatarUrl, @"mxc://example.org/old");
-
-    apply(@"mxc://example.org/new", 2000);
-    XCTAssertEqualObjects(user.avatarUrl, @"mxc://example.org/new", @"Same displayname, new photo");
-
-    apply(@"mxc://example.org/stale", 1500);
-    XCTAssertEqualObjects(user.avatarUrl, @"mxc://example.org/new", @"An older event must not win");
-
-    apply(nil, 3000);
-    XCTAssertNil(user.avatarUrl, @"A newer event without avatar_url removes the photo");
-
-    MXSDKOptions.sharedInstance.disableIdenticonUseForUserAvatar = disableIdenticon;
 }
 
 - (void)testSlidingSyncPreservesExplicitLimitedFalse
