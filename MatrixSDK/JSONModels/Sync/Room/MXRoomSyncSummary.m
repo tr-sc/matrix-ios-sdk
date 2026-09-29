@@ -16,6 +16,9 @@
 
 #import "MXRoomSyncSummary.h"
 
+NSString * const MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey = @"org.matrix.sdk.sliding_sync.hero_avatars";
+NSString * const MXRoomSyncSummarySlidingSyncAvatarJSONKey = @"org.matrix.sdk.sliding_sync.avatar";
+
 @implementation MXRoomSyncSummary
 
 - (instancetype)init
@@ -41,6 +44,8 @@
             MXJSONModelSetArray(roomSyncSummary.heroes, JSONDictionary[@"m.heroes"]);
             MXJSONModelSetUInteger(roomSyncSummary.joinedMemberCount, JSONDictionary[@"m.joined_member_count"]);
             MXJSONModelSetUInteger(roomSyncSummary.invitedMemberCount, JSONDictionary[@"m.invited_member_count"]);
+            MXJSONModelSetDictionary(roomSyncSummary.heroAvatars, JSONDictionary[MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey]);
+            MXJSONModelSetString(roomSyncSummary.avatar, JSONDictionary[MXRoomSyncSummarySlidingSyncAvatarJSONKey]);
         }
     }
     return roomSyncSummary;
@@ -53,6 +58,8 @@
     JSONDictionary[@"m.heroes"] = self.heroes;
     JSONDictionary[@"m.joined_member_count"] = @(self.joinedMemberCount);
     JSONDictionary[@"m.invited_member_count"] = @(self.invitedMemberCount);
+    JSONDictionary[MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey] = self.heroAvatars;
+    JSONDictionary[MXRoomSyncSummarySlidingSyncAvatarJSONKey] = self.avatar;
     
     return JSONDictionary;
 }

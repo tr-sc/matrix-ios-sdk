@@ -4,6 +4,7 @@
 #import "MXSlidingSync.h"
 #import "MXSyncResponse.h"
 #import "MXRoomSync.h"
+#import "MXRoomSyncSummary.h"
 #import "MXCredentials.h"
 
 NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentials)
@@ -67,6 +68,10 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     configuration.listName = @"main";
     configuration.requiredState = @[
         @[@"m.room.member", @"$ME"],
+        // Current member event of every timeline sender: a peer who changed the photo
+        // and then wrote arrives with the new avatar even when timeline_limit=1 hides
+        // the member event itself.
+        @[@"m.room.member", @"$LAZY"],
         @[@"m.room.encryption", @""],
         @[@"m.room.create", @""],
         @[@"m.room.name", @""],
@@ -272,14 +277,27 @@ NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId)
         if (!summary && (room[@"heroes"] || room[@"joined_count"] || room[@"invited_count"]))
         {
             NSMutableArray *heroIds = [NSMutableArray array];
+            // The server computes hero avatars from the current member state on every
+            // response. Keep them: a DM whose peer m.room.member fell into a limited
+            // timeline gap would otherwise keep the old photo.
+            NSMutableDictionary *heroAvatars = [NSMutableDictionary dictionary];
             for (id hero in room[@"heroes"] ?: @[])
             {
                 if ([hero isKindOfClass:NSString.class]) [heroIds addObject:hero];
-                else if ([hero isKindOfClass:NSDictionary.class] && hero[@"user_id"]) [heroIds addObject:hero[@"user_id"]];
+                else if ([hero isKindOfClass:NSDictionary.class] && [hero[@"user_id"] isKindOfClass:NSString.class])
+                {
+                    [heroIds addObject:hero[@"user_id"]];
+                    id heroAvatar = hero[@"avatar_url"];
+                    heroAvatars[hero[@"user_id"]] = [heroAvatar isKindOfClass:NSString.class] ? heroAvatar : NSNull.null;
+                }
             }
-            summary = @{@"m.heroes": heroIds,
-                        @"m.joined_member_count": room[@"joined_count"] ?: @0,
-                        @"m.invited_member_count": room[@"invited_count"] ?: @0};
+            NSMutableDictionary *legacySummary = [@{@"m.heroes": heroIds,
+                                                    @"m.joined_member_count": room[@"joined_count"] ?: @0,
+                                                    @"m.invited_member_count": room[@"invited_count"] ?: @0} mutableCopy];
+            if (heroAvatars.count) legacySummary[MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey] = heroAvatars;
+            id roomAvatar = room[@"avatar"];
+            if ([roomAvatar isKindOfClass:NSString.class]) legacySummary[MXRoomSyncSummarySlidingSyncAvatarJSONKey] = roomAvatar;
+            summary = legacySummary;
         }
         if (summary) legacyRoom[@"summary"] = summary;
         NSArray *roomAccountEvents = roomAccountData[roomId];

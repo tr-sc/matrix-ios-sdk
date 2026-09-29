@@ -68,13 +68,16 @@
     if ((NO == [_displayname isEqualToString:roomMember.displayname]
             || NO == [_avatarUrl isEqualToString:roomMember.avatarUrl]))
     {
-        if (roomMember.displayname && roomMemberEvent.originServerTs > latestUpdateTS)
+        // Decide freshness once per event: bumping latestUpdateTS in the displayname
+        // branch made the avatar branch's strict '>' fail for every event carrying
+        // both fields, so a new photo never reached MXUser.
+        if (roomMemberEvent.originServerTs > latestUpdateTS)
         {
-            self.displayname = [roomMember.displayname copy];
-            latestUpdateTS = roomMemberEvent.originServerTs;
-        }
-        if (roomMember.avatarUrl && roomMemberEvent.originServerTs > latestUpdateTS)
-        {
+            if (roomMember.displayname)
+            {
+                self.displayname = [roomMember.displayname copy];
+            }
+            // A newer member event without avatar_url means the photo was removed.
             self.avatarUrl = [roomMember.avatarUrl copy];
             latestUpdateTS = roomMemberEvent.originServerTs;
         }
@@ -100,16 +103,19 @@
     // only if they are provided.
     // Note: It is about to change in a short future in Matrix spec.
     // Displayname and avatar updates will come only through m.room.member events
-    if (presenceContent.displayname 
-            && NO == [_displayname isEqualToString:presenceContent.displayname]  
-            && presenceEvent.originServerTs > latestUpdateTS)
+    // Same as for member events: one freshness decision covers both fields.
+    BOOL isNewer = presenceEvent.originServerTs > latestUpdateTS;
+    BOOL profileUpdated = NO;
+    if (isNewer
+            && presenceContent.displayname
+            && NO == [_displayname isEqualToString:presenceContent.displayname])
     {
         self.displayname = [presenceContent.displayname copy];
-        latestUpdateTS = presenceEvent.originServerTs;
+        profileUpdated = YES;
     }
-    if (presenceContent.avatarUrl
-            && NO == [_avatarUrl isEqualToString:presenceContent.avatarUrl]
-            && presenceEvent.originServerTs > latestUpdateTS)
+    if (isNewer
+            && presenceContent.avatarUrl
+            && NO == [_avatarUrl isEqualToString:presenceContent.avatarUrl])
     {
         // We ignore non mxc avatar url
         if ([presenceContent.avatarUrl hasPrefix:kMXContentUriScheme])
@@ -120,6 +126,10 @@
         {
             self.avatarUrl = nil;
         }
+        profileUpdated = YES;
+    }
+    if (profileUpdated)
+    {
         latestUpdateTS = presenceEvent.originServerTs;
     }
     // Handle here the case where the user has no defined avatar.
@@ -151,7 +161,9 @@
 
             self.displayname = displayname;
             self.avatarUrl = avatarUrl;
-            self->latestUpdateTS = [[NSDate date] timeIntervalSince1970] * 1000;
+            // latestUpdateTS stays a server timestamp of the last applied member event.
+            // Writing the device clock here made a device running ahead reject later
+            // genuine member updates, since those carry origin_server_ts.
             success();
 
             [self notifyListeners:nil];
