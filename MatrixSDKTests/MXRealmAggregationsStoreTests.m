@@ -50,13 +50,18 @@
 }
 - (void)tearDown
 {
+    NSMutableArray<NSURL *> *fixtureDirectories = [NSMutableArray new];
     for (MXTestPreparedAggregationsStore *store in self.stores) {
         if (store.fixtureDirectory) {
-            NSError *error;
-            XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:store.fixtureDirectory error:&error], @"%@", error);
+            [fixtureDirectories addObject:store.fixtureDirectory];
         }
     }
+    // Release the stores' retained Realms before removing their database files.
     self.stores = nil;
+    for (NSURL *directory in fixtureDirectories) {
+        NSError *error;
+        XCTAssertTrue([NSFileManager.defaultManager removeItemAtURL:directory error:&error], @"%@", error);
+    }
     [super tearDown];
 }
 - (void)testEmptyLookupsPrepareConfigurationOnce

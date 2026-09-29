@@ -30,6 +30,9 @@
 @property (nonatomic) MXRealmAggregationsMapper *mapper;
 // Configuration is prepared once; Realm instances remain thread-confined.
 @property (nonatomic, strong) RLMRealmConfiguration *cachedRealmConfiguration;
+// Realm's thread-local cache is weak. Keep the main-thread instance alive
+// across mapping autorelease pools and chat transitions. Access only on main.
+@property (nonatomic, strong) RLMRealm *mainThreadRealm;
 
 @end
 
@@ -240,9 +243,16 @@
 
 - (nullable RLMRealm*)realm
 {
-    NSError *error;
+    NSError *error = nil;
     RLMRealmConfiguration *configuration = self.realmConfiguration;
+    // Continue using Realm's factory for configuration validation and thread
+    // confinement. Background callers get their own thread-local instance.
     RLMRealm *realm = [RLMRealm realmWithConfiguration:configuration error:&error];
+
+    if (NSThread.isMainThread)
+    {
+        self.mainThreadRealm = error ? nil : realm;
+    }
 
     if (error)
     {

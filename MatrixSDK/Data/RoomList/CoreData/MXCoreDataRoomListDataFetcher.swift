@@ -33,6 +33,23 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     private let dataUpdateDebounceInterval: TimeInterval
     private var pendingDataUpdate: DispatchWorkItem?
     private var dataUpdateGeneration: UInt = 0
+    private var needsFetchAfterFailure = false
+
+    /// Network state used by the last published snapshot. Content changes still
+    /// arrive independently through the FRC / summary-store observers.
+    private struct SlidingSyncListState: Equatable {
+        let order: [String]
+        let networkComplete: Bool
+        let initialWindowIDs: [String]?
+    }
+
+    @nonobjc private var lastComputedSlidingSyncState: SlidingSyncListState?
+
+    @nonobjc private var currentSlidingSyncState: SlidingSyncListState {
+        SlidingSyncListState(order: session?.slidingSyncRoomOrder ?? [],
+                            networkComplete: session?.roomListTotalsArePartial != true,
+                            initialWindowIDs: session == nil ? [] : session?.slidingSyncInitialWindowRoomIds)
+    }
     
     internal private(set) var data: MXRoomListData? {
         didSet {
@@ -155,7 +172,7 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     func paginate() {
         guard let oldData = data else {
             //  load first page
-            performFetch()
+            performFetch(reason: "firstPage")
             return
         }
         
@@ -166,14 +183,14 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         removeCacheIfRequired()
         let numberOfItems = (oldData.currentPage + 2) * oldData.paginationOptions.rawValue
         fetchedResultsController.fetchRequest.fetchLimit = numberOfItems > 0 ? numberOfItems : 0
-        performFetch()
+        performFetch(reason: "paginate")
     }
     
     func resetPagination() {
         removeCacheIfRequired()
         let numberOfItems = fetchOptions.paginationOptions.rawValue
         fetchedResultsController.fetchRequest.fetchLimit = numberOfItems > 0 ? numberOfItems : 0
-        performFetch()
+        performFetch(reason: "resetPagination")
     }
     
     func refresh() {
@@ -208,11 +225,20 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         }
     }
     
-    private func performFetch() {
+    private func performFetch(reason: String) {
+        #if DEBUG
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        defer {
+            let elapsedMS = (ProcessInfo.processInfo.systemUptime - startedAt) * 1000
+            MXLog.debug("[TrscRoomListPerf] fullFetch fetcher=\(ObjectIdentifier(self)) reason=\(reason) limit=\(fetchedResultsController.fetchRequest.fetchLimit) rows=\(fetchedResultsController.fetchedObjects?.count ?? 0) failed=\(needsFetchAfterFailure) ms=\(elapsedMS)")
+        }
+        #endif
         do {
             try fetchedResultsController.performFetch()
+            needsFetchAfterFailure = false
             computeData()
         } catch let error {
+            needsFetchAfterFailure = true
             MXLog.error("[MXCoreDataRoomListDataFetcher] failed to perform fetch", context: error)
         }
     }
@@ -255,10 +281,13 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         fetchedResultsController.fetchRequest.predicate = filterPredicate(for: filterOptions)
         fetchedResultsController.fetchRequest.sortDescriptors = sortDescriptors(for: sortOptions)
         fetchedResultsController.fetchRequest.fetchLimit = numberOfItems > 0 ? numberOfItems : 0
-        performFetch()
+        performFetch(reason: "recomputeData")
     }
     
     private func computeData() {
+        // An explicit fetch may have already consumed the changes for which a
+        // delayed update was queued. Do not build the same snapshot again.
+        cancelPendingDataUpdate()
         guard let summaries = fetchedResultsController.fetchedObjects else {
             data = nil
             return
@@ -273,7 +302,8 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         } else {
             mapped = mapSummaries(summaries)
         }
-        let serverOrder = session?.slidingSyncRoomOrder ?? []
+        let syncState = currentSlidingSyncState
+        let serverOrder = syncState.order
         if !serverOrder.isEmpty {
             let rank = Dictionary(uniqueKeysWithValues: serverOrder.enumerated().map { ($1, $0) })
             mapped.sort {
@@ -285,7 +315,9 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         }
         let counts = MXStoreRoomListDataCounts(withRooms: mapped,
                                                total: totalCounts)
-        let coverage = localStoreCoverage(serverOrder)
+        let coverage = localStoreCoverage(syncState)
+        // Set before publishing: delegates may synchronously request updates.
+        lastComputedSlidingSyncState = syncState
         data = MXRoomListData(rooms: mapped,
                               counts: counts,
                               paginationOptions: fetchOptions.paginationOptions,
@@ -297,9 +329,10 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     /// Check identity coverage before section filters (archive, spaces, etc.).
     /// This runs on the same main context as the FRC and fetches identifiers
     /// only; it never waits for or decrypts the background summary queue.
-    private func localStoreCoverage(_ serverOrder: [String]) -> (complete: Bool, initialWindowReady: Bool) {
-        let networkComplete = session?.roomListTotalsArePartial != true
-        let initialIDs: [String]? = session == nil ? [] : session?.slidingSyncInitialWindowRoomIds
+    @nonobjc private func localStoreCoverage(_ state: SlidingSyncListState) -> (complete: Bool, initialWindowReady: Bool) {
+        let serverOrder = state.order
+        let networkComplete = state.networkComplete
+        let initialIDs = state.initialWindowIDs
         guard !serverOrder.isEmpty else { return (networkComplete, initialIDs != nil) }
         let request = NSFetchRequest<NSDictionary>(entityName: MXRoomSummaryMO.entity().name!)
         request.resultType = .dictionaryResultType
@@ -321,6 +354,7 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
 
     @objc
     private func roomListProgressUpdated(_ notification: Notification) {
+        guard currentSlidingSyncState != lastComputedSlidingSyncState else { return }
         scheduleDataUpdate()
     }
 
@@ -338,11 +372,27 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
 
     @objc
     private func slidingSyncOrderUpdated(_ notification: Notification) {
-        // Sliding Sync fetches only hydrated summaries, so an unrestricted FRC is cheap for
-        // the initial window and is required to preserve server order across section filters.
-        fetchedResultsController.fetchRequest.fetchLimit = 0
-        fetchedResultsController.fetchRequest.predicate = filterPredicate(for: filterOptions)
-        performFetch()
+        let request = fetchedResultsController.fetchRequest
+        let predicate = filterPredicate(for: filterOptions)
+        // Server rank is applied in computeData, not in the Core Data query.
+        // Insertions/deletions/summary changes are maintained by the FRC.
+        // Only entering unrestricted mode, a new predicate (e.g. excluded
+        // rooms), or an uninitialised FRC requires another database fetch.
+        // Record all applicable reasons before changing the request. A fetch
+        // may both retry a failure and apply a newly changed predicate.
+        var fetchReasons: [String] = []
+        if needsFetchAfterFailure { fetchReasons.append("retryAfterFailure") }
+        if fetchedResultsController.fetchedObjects == nil { fetchReasons.append("uninitialized") }
+        if request.fetchLimit != 0 { fetchReasons.append("removeLimit(\(request.fetchLimit))") }
+        if request.predicate != predicate { fetchReasons.append("predicateChanged") }
+        if !fetchReasons.isEmpty {
+            request.fetchLimit = 0
+            request.predicate = predicate
+            performFetch(reason: "slidingSync:" + fetchReasons.joined(separator: ","))
+        } else if currentSlidingSyncState != lastComputedSlidingSyncState {
+            // Coalesce with progress and content notifications in this sync.
+            scheduleDataUpdate()
+        }
     }
 
     /// The session cache is pre-warmed before room-list fetchers are created.
@@ -425,7 +475,7 @@ extension MXCoreDataRoomListDataFetcher: MXRoomListDataFilterable {
         var predicates: [NSPredicate] = []
         if let excluded = session?.slidingSyncExcludedRoomIds, !excluded.isEmpty {
             predicates.append(NSPredicate(format: "NOT (%K IN %@)",
-                                          #keyPath(MXRoomSummaryMO.s_identifier), Array(excluded)))
+                                          #keyPath(MXRoomSummaryMO.s_identifier), Array(excluded).sorted()))
         }
         
         if !filterOptions.onlySuggested {
