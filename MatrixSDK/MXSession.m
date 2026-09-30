@@ -1773,6 +1773,12 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
 - (void)applySlidingSyncList:(MXSlidingSyncList *)list rooms:(NSDictionary<NSString *, NSDictionary *> *)responseRooms
 {
     NSUInteger previousLoaded = self.slidingSyncRoomOrder.count;
+    // What the list looked like before this response: an empty long-poll return
+    // must not make the room list re-fetch and re-sort every summary.
+    NSArray<NSString *> *previousOrder = self.slidingSyncRoomOrder ?: @[];
+    NSSet<NSString *> *previousExcluded = self.slidingSyncExcludedRoomIds ?: [NSSet set];
+    NSUInteger previousTotal = self.slidingSyncTotalRoomCount;
+    BOOL previousNeedsRefresh = self.slidingSyncNeedsListRefresh;
     if (!list.hasCount)
     {
         self.slidingSyncNeedsListRefresh = YES;
@@ -1883,8 +1889,14 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
     }
 
     NSMutableArray<NSString *> *order = [NSMutableArray array];
+    // A set for the duplicate check: `containsObject:` on the array was O(n²) over ~1.5k rooms.
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
     for (id value in self.slidingSyncOrderedSlots)
-        if ([value isKindOfClass:NSString.class] && ![order containsObject:value]) [order addObject:value];
+        if ([value isKindOfClass:NSString.class] && ![seen containsObject:value])
+        {
+            [seen addObject:value];
+            [order addObject:value];
+        }
     [excluded minusSet:[NSSet setWithArray:order]];
     self.slidingSyncExcludedRoomIds = excluded;
     self.slidingSyncRoomOrder = order;
@@ -1898,7 +1910,19 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         MXLogWarning(@"[MXSession][SlidingSync] list_refresh needed reason=%@ loaded=%tu total=%tu rangeEnd=%tu",
                      inconsistent ? @"count_mismatch" : @"window_stalled", order.count, list.count, self.slidingSyncRangeEnd);
     }
-    [[NSNotificationCenter defaultCenter] postNotificationName:MXSessionSlidingSyncRoomOrderDidChangeNotification object:self];
+    // Every long-poll return lands here, most of them with no rooms and no ops. Posting
+    // for those re-fetched and re-sorted ~1.5k summaries on the main thread (~100 ms per
+    // response, a hitch under an open chat). Summary content changes still reach the
+    // room list through its fetched-results delegate.
+    BOOL orderChanged = responseRooms.count > 0
+        || list.count != previousTotal
+        || self.slidingSyncNeedsListRefresh != previousNeedsRefresh
+        || ![order isEqualToArray:previousOrder]
+        || ![excluded isEqualToSet:previousExcluded];
+    if (orderChanged)
+    {
+        [[NSNotificationCenter defaultCenter] postNotificationName:MXSessionSlidingSyncRoomOrderDidChangeNotification object:self];
+    }
 }
 
 - (void)updateSlidingSyncRoomListProgress

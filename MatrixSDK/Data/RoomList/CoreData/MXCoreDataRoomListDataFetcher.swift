@@ -54,6 +54,17 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
     }
     private let store: MXRoomSummaryCoreDataContextableStore
     private weak var session: MXSession?
+
+    /// Room-list progress last acted on. Every long-poll return re-posts the progress
+    /// notification with nothing changed, and recomputing ~1.5k summaries on the main
+    /// thread for it cost ~100 ms per response.
+    private struct ProgressKey: Equatable {
+        let phase: Int
+        let loaded: UInt
+        let total: UInt
+        let partial: Bool
+    }
+    private var lastProgressKey: ProgressKey?
     
     private lazy var fetchedResultsController: NSFetchedResultsController<MXRoomSummaryMO> = {
         let request = MXRoomSummaryMO.typedFetchRequest()
@@ -186,10 +197,12 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
             return
         }
         data = nil
+        lastProgressKey = nil
         recomputeData(using: oldData)
     }
     
     func stop() {
+        lastProgressKey = nil
         NotificationCenter.default.removeObserver(self)
         cancelPendingDataUpdate()
         fetchedResultsController.delegate = nil
@@ -321,6 +334,15 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
 
     @objc
     private func roomListProgressUpdated(_ notification: Notification) {
+        let state = session?.roomListState
+        let key = ProgressKey(
+            phase: state.map { Int($0.phase.rawValue) } ?? -1,
+            loaded: UInt(state?.loaded ?? 0),
+            total: UInt(state?.total ?? 0),
+            partial: session?.roomListTotalsArePartial ?? false
+        )
+        guard key != lastProgressKey else { return }
+        lastProgressKey = key
         scheduleDataUpdate()
     }
 
