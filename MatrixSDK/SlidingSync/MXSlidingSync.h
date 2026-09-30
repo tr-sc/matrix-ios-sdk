@@ -42,6 +42,12 @@ typedef NS_ENUM(NSUInteger, MXSlidingSyncRoomListPhase) {
 @property (nonatomic) NSUInteger expandedWindowSize;
 @property (nonatomic) NSUInteger backgroundBatchSize;
 @property (nonatomic) NSUInteger timelineLimit;
+/**
+ Timeline limit of the rooms a screen keeps open (`-[MXSession subscribeOpenRoomWithRoomId:]`).
+ With the list limit of 1, two events that land between two responses arrive as the newest one
+ plus a `limited` gap, and the SDK flushes the room history.
+ */
+@property (nonatomic) NSUInteger openRoomTimelineLimit;
 @property (nonatomic) BOOL lazyLoadMembers;
 @property (nonatomic) BOOL backgroundHydrationEnabled;
 @property (nonatomic, copy) NSString *listName;
@@ -54,6 +60,14 @@ typedef NS_ENUM(NSUInteger, MXSlidingSyncRoomListPhase) {
                                                     connectionId:(NSString *)connectionId
                                                           ranges:(NSArray<NSArray<NSNumber *> *> *)ranges
                                                roomSubscriptions:(nullable NSArray<NSString *> *)roomIds
+                                                         timeout:(NSUInteger)timeout
+                                                     setPresence:(nullable NSString *)setPresence;
+/** Same, with `openRoomIds` subscribed at `openRoomTimelineLimit`. */
+- (NSDictionary<NSString *, id> *)requestDictionaryWithPosition:(nullable NSString *)position
+                                                    connectionId:(NSString *)connectionId
+                                                          ranges:(NSArray<NSArray<NSNumber *> *> *)ranges
+                                               roomSubscriptions:(nullable NSArray<NSString *> *)roomIds
+                                           openRoomSubscriptions:(nullable NSArray<NSString *> *)openRoomIds
                                                          timeout:(NSUInteger)timeout
                                                      setPresence:(nullable NSString *)setPresence;
 @end

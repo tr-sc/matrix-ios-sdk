@@ -268,6 +268,8 @@ typedef void (^MXOnResumeDone)(void);
 @property (nonatomic, strong) NSMutableArray *slidingSyncOrderedSlots;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *slidingSyncBumpStamps;
 @property (nonatomic, strong) NSMutableSet<NSString *> *slidingSyncSubscriptions;
+/** Rooms a screen keeps open (`subscribeOpenRoomWithRoomId:`), counted per screen. */
+@property (nonatomic, strong) NSCountedSet<NSString *> *slidingSyncOpenRooms;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, void (^)(MXRoom *)> *slidingSyncSubscriptionSuccesses;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, void (^)(NSError *)> *slidingSyncSubscriptionFailures;
 @property (nonatomic, copy) void (^slidingSyncRoomListReadyCallback)(void);
@@ -326,6 +328,7 @@ typedef void (^MXOnResumeDone)(void);
         _slidingSyncOrderedSlots = [NSMutableArray array];
         _slidingSyncBumpStamps = [NSMutableDictionary dictionary];
         _slidingSyncSubscriptions = [NSMutableSet set];
+        _slidingSyncOpenRooms = [NSCountedSet set];
         _slidingSyncSubscriptionSuccesses = [NSMutableDictionary dictionary];
         _slidingSyncSubscriptionFailures = [NSMutableDictionary dictionary];
 
@@ -1148,6 +1151,53 @@ typedef void (^MXOnResumeDone)(void);
     [self serverSyncWithServerTimeout:0 success:nil failure:nil clientTimeout:CLIENT_TIMEOUT_MS setPresence:self.preferredSyncPresenceString];
 }
 
+- (void)subscribeOpenRoomWithRoomId:(NSString *)roomId
+{
+    if (!roomId.length) return;
+    [self.slidingSyncOpenRooms addObject:roomId];
+    MXLogDebug(@"[MXSession][SlidingSync] open room subscribed room=%@ count=%tu", roomId, [self.slidingSyncOpenRooms countForObject:roomId]);
+}
+
+- (void)unsubscribeOpenRoomWithRoomId:(NSString *)roomId
+{
+    if (!roomId.length || ![self.slidingSyncOpenRooms containsObject:roomId]) return;
+    [self.slidingSyncOpenRooms removeObject:roomId];
+    MXLogDebug(@"[MXSession][SlidingSync] open room unsubscribed room=%@ count=%tu", roomId, [self.slidingSyncOpenRooms countForObject:roomId]);
+}
+
+/** A subscription, not the list, is why this room is in the response. */
+- (BOOL)isSlidingSyncSubscribedRoom:(NSString *)roomId
+{
+    return [self.slidingSyncSubscriptions containsObject:roomId] || [self.slidingSyncOpenRooms containsObject:roomId];
+}
+
+// Tuwunel puts every subscribed room into every response, changed or not. An open room entry that
+// no list matched, with no timeline and no initial/limited/invite state, carries nothing the store
+// lacks — yet applying it saved the room summary and posted a room-order change, which re-sorted
+// the whole room list under the open chat on every long-poll return.
+- (NSDictionary<NSString *, NSDictionary *> *)slidingSyncRoomsWithoutIdleOpenRooms:(NSDictionary<NSString *, NSDictionary *> *)rooms
+{
+    if (!self.slidingSyncOpenRooms.count || !rooms.count) return rooms;
+    NSMutableDictionary<NSString *, NSDictionary *> *filtered;
+    for (NSString *roomId in rooms)
+    {
+        if (![self.slidingSyncOpenRooms containsObject:roomId]) continue;
+        NSDictionary *room = rooms[roomId];
+        if (![room isKindOfClass:NSDictionary.class]) continue;
+        NSArray *lists = room[@"lists"];
+        NSArray *timeline = room[@"timeline"];
+        BOOL idle = !([lists isKindOfClass:NSArray.class] && lists.count)
+            && !([timeline isKindOfClass:NSArray.class] && timeline.count)
+            && ![room[@"initial"] boolValue]
+            && ![room[@"limited"] boolValue]
+            && !room[@"invite_state"];
+        if (!idle) continue;
+        if (!filtered) filtered = [rooms mutableCopy];
+        [filtered removeObjectForKey:roomId];
+    }
+    return filtered ?: rooms;
+}
+
 - (void)startWithSyncFilter:(MXFilterJSONModel*)syncFilter
            onServerSyncDone:(void (^)(void))onServerSyncDone
                     failure:(void (^)(NSError *error))failure;
@@ -1877,7 +1927,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
             NSNumber *stamp = MXSlidingSyncBumpStampForRoom(room, membership);
             // A subscription can deliver a room outside the list. Only a
             // verified list snapshot may restore that subscribed room's rank.
-            if ([excluded containsObject:roomId] && [self.slidingSyncSubscriptions containsObject:roomId]) return;
+            if ([excluded containsObject:roomId] && [self isSlidingSyncSubscribedRoom:roomId]) return;
             if ([room[@"bump_stamp"] isKindOfClass:NSNumber.class] || (stamp && !self.slidingSyncBumpStamps[roomId]))
                 self.slidingSyncBumpStamps[roomId] = stamp;
         }];
@@ -1994,6 +2044,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                                                           connectionId:connectionId
                                                                 ranges:@[@[@0, @(self.slidingSyncRangeEnd)]]
                                                      roomSubscriptions:refresh ? nil : self.slidingSyncSubscriptions.allObjects
+                                                 openRoomSubscriptions:refresh ? nil : self.slidingSyncOpenRooms.allObjects
                                                                timeout:serverTimeout setPresence:setPresence];
 }
 
@@ -2024,8 +2075,11 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         MXLogDebug(@"[MXSession][SlidingSync] response received in %.0fms at pos %@", [NSDate.date timeIntervalSinceDate:startedAt] * 1000, response.position);
 
         MXSlidingSyncList *list = response.lists[self.slidingSyncConfiguration.listName];
-        MXLogDebug(@"[MXSession][SlidingSync] response range=0..%tu rooms=%tu listPresent=%@ count=%tu ops=%tu positionChanged=%@ elapsedMs=%.0f",
-                   requestedRangeEnd, response.rooms.count, list ? @"YES" : @"NO", list.count, list.operations.count,
+        // Subscription callbacks still see every returned room; only the store and the list skip idle ones.
+        NSDictionary<NSString *, NSDictionary *> *receivedRooms = response.rooms;
+        response.rooms = [self slidingSyncRoomsWithoutIdleOpenRooms:receivedRooms];
+        MXLogDebug(@"[MXSession][SlidingSync] response range=0..%tu rooms=%tu idleOpenRooms=%tu listPresent=%@ count=%tu ops=%tu positionChanged=%@ elapsedMs=%.0f",
+                   requestedRangeEnd, response.rooms.count, receivedRooms.count - response.rooms.count, list ? @"YES" : @"NO", list.count, list.operations.count,
                    [requestedPosition isEqualToString:response.position] ? @"NO" : @"YES",
                    [NSDate.date timeIntervalSinceDate:startedAt] * 1000);
         void (^processLegacyResponse)(MXSyncResponse *) = ^(MXSyncResponse *legacyResponse) {
@@ -2039,7 +2093,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                     self.slidingSyncApplyingFullListRefresh = NO;
                     [self updateSlidingSyncRoomListProgress];
                     os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "initial_rooms_processed");
-                    for (NSString *roomId in response.rooms)
+                    for (NSString *roomId in receivedRooms)
                     {
                         void (^subscriptionSuccess)(MXRoom *) = self.slidingSyncSubscriptionSuccesses[roomId];
                         if (subscriptionSuccess)

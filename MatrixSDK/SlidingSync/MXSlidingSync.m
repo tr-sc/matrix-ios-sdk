@@ -63,6 +63,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     configuration.expandedWindowSize = 250;
     configuration.backgroundBatchSize = 250;
     configuration.timelineLimit = 1;
+    configuration.openRoomTimelineLimit = 20;
     configuration.lazyLoadMembers = YES;
     configuration.backgroundHydrationEnabled = YES;
     configuration.listName = @"main";
@@ -98,6 +99,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     copy.expandedWindowSize = self.expandedWindowSize;
     copy.backgroundBatchSize = self.backgroundBatchSize;
     copy.timelineLimit = self.timelineLimit;
+    copy.openRoomTimelineLimit = self.openRoomTimelineLimit;
     copy.lazyLoadMembers = self.lazyLoadMembers;
     copy.backgroundHydrationEnabled = self.backgroundHydrationEnabled;
     copy.listName = self.listName;
@@ -114,6 +116,23 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
                                                         timeout:(NSUInteger)timeout
                                                     setPresence:(NSString *)setPresence
 {
+    return [self requestDictionaryWithPosition:position
+                                  connectionId:connectionId
+                                        ranges:ranges
+                             roomSubscriptions:roomIds
+                         openRoomSubscriptions:nil
+                                       timeout:timeout
+                                   setPresence:setPresence];
+}
+
+- (NSDictionary<NSString *,id> *)requestDictionaryWithPosition:(NSString *)position
+                                                   connectionId:(NSString *)connectionId
+                                                         ranges:(NSArray<NSArray<NSNumber *> *> *)ranges
+                                              roomSubscriptions:(NSArray<NSString *> *)roomIds
+                                          openRoomSubscriptions:(NSArray<NSString *> *)openRoomIds
+                                                        timeout:(NSUInteger)timeout
+                                                    setPresence:(NSString *)setPresence
+{
     NSMutableDictionary *request = [NSMutableDictionary dictionary];
     if (position.length) request[@"pos"] = position;
     if (connectionId.length) request[@"conn_id"] = connectionId;
@@ -127,13 +146,22 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
         }
     };
     request[@"extensions"] = self.extensions ?: @{};
-    if (roomIds.count)
+    if (roomIds.count || openRoomIds.count)
     {
-        NSMutableDictionary *subscriptions = [NSMutableDictionary dictionaryWithCapacity:roomIds.count];
+        NSMutableDictionary *subscriptions = [NSMutableDictionary dictionaryWithCapacity:roomIds.count + openRoomIds.count];
         for (NSString *roomId in roomIds)
         {
             subscriptions[roomId] = @{
                 @"timeline_limit": @(MAX(self.timelineLimit, 1)),
+                @"required_state": self.requiredState ?: @[]
+            };
+        }
+        // An open room may also be a plain subscription (opened outside the list window):
+        // the larger limit wins, the server takes one config per subscribed room.
+        for (NSString *roomId in openRoomIds)
+        {
+            subscriptions[roomId] = @{
+                @"timeline_limit": @(MAX(MAX(self.openRoomTimelineLimit, self.timelineLimit), 1)),
                 @"required_state": self.requiredState ?: @[]
             };
         }

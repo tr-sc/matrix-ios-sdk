@@ -596,6 +596,23 @@ FOUNDATION_EXPORT NSString *const kMXSessionNoRoomTag;
                               failure:(nullable void (^)(NSError *error))failure;
 
 /**
+ Keep a room that a screen shows in the Sliding Sync room subscriptions, even when the room
+ list already contains it, at `MXSlidingSyncConfiguration.openRoomTimelineLimit`.
+
+ The list asks for one event per room: a burst of events between two responses (a series of
+ messages, a message and its reaction, an album) arrives as the newest event plus `limited`,
+ and the room history is flushed. The server applies the largest limit of the list and the
+ subscription, so the open room gets its whole burst.
+
+ Calls are counted per room and must be balanced by `unsubscribeOpenRoomWithRoomId:`. The change
+ applies from the next Sliding Sync request. No-op with the legacy /sync.
+ */
+- (void)subscribeOpenRoomWithRoomId:(NSString *)roomId;
+
+/** Balance a `subscribeOpenRoomWithRoomId:` call. */
+- (void)unsubscribeOpenRoomWithRoomId:(NSString *)roomId;
+
+/**
  Start the session like `[MXSession start]` but with using a filter in /sync requests.
 
  @param syncFilter the filter to use.
