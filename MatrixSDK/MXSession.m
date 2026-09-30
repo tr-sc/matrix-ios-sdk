@@ -1171,13 +1171,45 @@ typedef void (^MXOnResumeDone)(void);
     return [self.slidingSyncSubscriptions containsObject:roomId] || [self.slidingSyncOpenRooms containsObject:roomId];
 }
 
+static BOOL MXSlidingSyncJSONFlag(id value)
+{
+    return [value isKindOfClass:NSNumber.class] && [value boolValue];
+}
+
+static NSDictionary *MXSlidingSyncExtensionRooms(NSDictionary *extensions, NSString *name)
+{
+    NSDictionary *extension = extensions[name];
+    if (![extension isKindOfClass:NSDictionary.class]) return nil;
+    NSDictionary *rooms = extension[@"rooms"];
+    return [rooms isKindOfClass:NSDictionary.class] ? rooms : nil;
+}
+
+// Tuwunel sends a room's typing users in every response while somebody types, changed or not.
+- (BOOL)slidingSyncTypingEntry:(id)entry changesRoom:(NSString *)roomId
+{
+    if (!entry) return NO;
+    id content = entry;
+    if ([content isKindOfClass:NSDictionary.class] && content[@"type"]) content = content[@"content"];
+    NSArray *userIds = [content isKindOfClass:NSDictionary.class] ? content[@"user_ids"] : nil;
+    MXRoom *room = [self roomWithRoomId:roomId];
+    if (![userIds isKindOfClass:NSArray.class] || !room) return YES;
+    return ![[NSSet setWithArray:userIds] isEqualToSet:[NSSet setWithArray:room.typingUsers ?: @[]]];
+}
+
 // Tuwunel puts every subscribed room into every response, changed or not. An open room entry that
 // no list matched, with no timeline and no initial/limited/invite state, carries nothing the store
 // lacks — yet applying it saved the room summary and posted a room-order change, which re-sorted
 // the whole room list under the open chat on every long-poll return.
+// Receipts, typing and room account data of the response reach a room only through its entry
+// (`legacySyncResponseForUserId:`), and an unread count change comes without a timeline: such an
+// entry is not idle.
 - (NSDictionary<NSString *, NSDictionary *> *)slidingSyncRoomsWithoutIdleOpenRooms:(NSDictionary<NSString *, NSDictionary *> *)rooms
+                                                                         extensions:(NSDictionary *)extensions
 {
     if (!self.slidingSyncOpenRooms.count || !rooms.count) return rooms;
+    NSDictionary *receipts = MXSlidingSyncExtensionRooms(extensions, @"receipts");
+    NSDictionary *typing = MXSlidingSyncExtensionRooms(extensions, @"typing");
+    NSDictionary *roomAccountData = MXSlidingSyncExtensionRooms(extensions, @"account_data");
     NSMutableDictionary<NSString *, NSDictionary *> *filtered;
     for (NSString *roomId in rooms)
     {
@@ -1188,10 +1220,24 @@ typedef void (^MXOnResumeDone)(void);
         NSArray *timeline = room[@"timeline"];
         BOOL idle = !([lists isKindOfClass:NSArray.class] && lists.count)
             && !([timeline isKindOfClass:NSArray.class] && timeline.count)
-            && ![room[@"initial"] boolValue]
-            && ![room[@"limited"] boolValue]
-            && !room[@"invite_state"];
+            && !MXSlidingSyncJSONFlag(room[@"initial"])
+            && !MXSlidingSyncJSONFlag(room[@"limited"])
+            && !room[@"invite_state"]
+            && !receipts[roomId] && !roomAccountData[roomId]
+            && ![self slidingSyncTypingEntry:typing[roomId] changesRoom:roomId];
         if (!idle) continue;
+        NSDictionary *unread = room[@"unread_notifications"];
+        if (![unread isKindOfClass:NSDictionary.class]) unread = room;
+        id notificationCount = unread[@"notification_count"];
+        id highlightCount = unread[@"highlight_count"];
+        if ([notificationCount isKindOfClass:NSNumber.class] || [highlightCount isKindOfClass:NSNumber.class])
+        {
+            MXRoomSummary *summary = [self roomSummaryWithRoomId:roomId];
+            BOOL countsChanged = !summary
+                || ([notificationCount isKindOfClass:NSNumber.class] && [notificationCount unsignedIntegerValue] != summary.notificationCount)
+                || ([highlightCount isKindOfClass:NSNumber.class] && [highlightCount unsignedIntegerValue] != summary.highlightCount);
+            if (countsChanged) continue;
+        }
         if (!filtered) filtered = [rooms mutableCopy];
         [filtered removeObjectForKey:roomId];
     }
@@ -2077,7 +2123,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         MXSlidingSyncList *list = response.lists[self.slidingSyncConfiguration.listName];
         // Subscription callbacks still see every returned room; only the store and the list skip idle ones.
         NSDictionary<NSString *, NSDictionary *> *receivedRooms = response.rooms;
-        response.rooms = [self slidingSyncRoomsWithoutIdleOpenRooms:receivedRooms];
+        response.rooms = [self slidingSyncRoomsWithoutIdleOpenRooms:receivedRooms extensions:response.extensions];
         MXLogDebug(@"[MXSession][SlidingSync] response range=0..%tu rooms=%tu idleOpenRooms=%tu listPresent=%@ count=%tu ops=%tu positionChanged=%@ elapsedMs=%.0f",
                    requestedRangeEnd, response.rooms.count, receivedRooms.count - response.rooms.count, list ? @"YES" : @"NO", list.count, list.operations.count,
                    [requestedPosition isEqualToString:response.position] ? @"NO" : @"YES",
