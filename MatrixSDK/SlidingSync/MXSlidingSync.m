@@ -347,15 +347,22 @@ NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId)
     NSDictionary *toDevice = self.extensions[@"to_device"] ?: @{};
     NSArray *globalAccountData = accountData[@"global"];
     if ([globalAccountData isKindOfClass:NSDictionary.class]) globalAccountData = ((NSDictionary *)globalAccountData)[@"events"];
-    NSDictionary *json = @{
+    NSMutableDictionary *json = [@{
         @"next_batch": self.position ?: @"",
         @"rooms": @{@"join": join, @"invite": invite, @"leave": leave},
         @"to_device": @{@"events": toDevice[@"events"] ?: @[]},
         @"device_lists": e2ee[@"device_lists"] ?: @{},
         @"device_one_time_keys_count": e2ee[@"device_one_time_keys_count"] ?: @{},
-        @"org.matrix.msc2732.device_unused_fallback_key_types": e2ee[@"device_unused_fallback_key_types"] ?: @[],
         @"account_data": @{@"events": globalAccountData ?: @[]}
-    };
+    } mutableCopy];
+    // The server sends the unused fallback key types only at connection start and after the
+    // user's keys change. Absent means "unknown" (nil for the crypto machine), not "none left":
+    // an empty list would ask the crypto machine to upload a new fallback key.
+    id unusedFallbackKeyTypes = e2ee[@"device_unused_fallback_key_types"];
+    if ([unusedFallbackKeyTypes isKindOfClass:NSArray.class])
+    {
+        json[@"org.matrix.msc2732.device_unused_fallback_key_types"] = unusedFallbackKeyTypes;
+    }
     return [MXSyncResponse modelFromJSON:json];
 }
 @end
