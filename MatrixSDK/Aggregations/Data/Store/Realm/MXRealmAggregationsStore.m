@@ -29,6 +29,14 @@
 @property (nonatomic) NSString *userId;
 @property (nonatomic) MXRealmAggregationsMapper *mapper;
 
+/// Built once: every lookup used to hit the file system (caches URL, createDirectory).
+@property (nonatomic, nullable) RLMRealmConfiguration *cachedRealmConfiguration;
+
+/// Kept alive so Realm keeps the file open. With no live instance each lookup re-opened the
+/// DB (file opens, interprocess mutexes, backup cleanup) — about 1 ms per reaction lookup, on
+/// the main thread while a chat scrolls. Main thread only: RLMRealm is thread-confined.
+@property (nonatomic, nullable) RLMRealm *mainThreadRealm;
+
 @end
 
 
@@ -238,6 +246,12 @@
 
 - (nullable RLMRealm*)realm
 {
+    BOOL isMainThread = NSThread.isMainThread;
+    if (isMainThread && self.mainThreadRealm)
+    {
+        return self.mainThreadRealm;
+    }
+
     NSError *error;
     RLMRealm *realm = [RLMRealm realmWithConfiguration:self.realmConfiguration error:&error];
 
@@ -246,10 +260,28 @@
         MXLogDebug(@"[MXRealmFileProvider] realmForUser gets error: %@", error);
     }
 
+    if (isMainThread && realm)
+    {
+        self.mainThreadRealm = realm;
+    }
+
     return realm;
 }
 
 - (nonnull RLMRealmConfiguration*)realmConfiguration
+{
+    @synchronized (self)
+    {
+        if (!self.cachedRealmConfiguration)
+        {
+            self.cachedRealmConfiguration = [self makeRealmConfiguration];
+        }
+        // A copy per caller: the configuration is a mutable object shared across threads.
+        return [self.cachedRealmConfiguration copy];
+    }
+}
+
+- (nonnull RLMRealmConfiguration*)makeRealmConfiguration
 {
     RLMRealmConfiguration *realmConfiguration = [RLMRealmConfiguration defaultConfiguration];
 
