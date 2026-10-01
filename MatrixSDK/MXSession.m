@@ -2006,12 +2006,12 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         MXLogWarning(@"[MXSession][SlidingSync] list_refresh needed reason=%@ loaded=%tu total=%tu rangeEnd=%tu",
                      inconsistent ? @"count_mismatch" : @"window_stalled", order.count, list.count, self.slidingSyncRangeEnd);
     }
-    // Every long-poll return lands here, most of them with no rooms and no ops. Posting
-    // for those re-fetched and re-sorted ~1.5k summaries on the main thread (~100 ms per
-    // response, a hitch under an open chat). Summary content changes still reach the
-    // room list through its fetched-results delegate.
-    BOOL orderChanged = responseRooms.count > 0
-        || list.count != previousTotal
+    // Every long-poll return lands here. Posting re-fetches and re-sorts ~1.5k summaries on
+    // the main thread (~100 ms per response, a hitch under an open chat), so it is posted
+    // only when the order itself moved. A response with rooms in an unchanged order (the
+    // open chat's own message: it is on top already) is no exception: summary content
+    // changes reach the room list through its fetched-results delegate.
+    BOOL orderChanged = list.count != previousTotal
         || self.slidingSyncNeedsListRefresh != previousNeedsRefresh
         || ![order isEqualToArray:previousOrder]
         || ![excluded isEqualToSet:previousExcluded];
