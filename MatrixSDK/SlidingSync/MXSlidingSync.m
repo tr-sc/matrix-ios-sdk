@@ -4,6 +4,7 @@
 #import "MXSlidingSync.h"
 #import "MXSyncResponse.h"
 #import "MXRoomSync.h"
+#import "MXRoomSyncSummary.h"
 #import "MXCredentials.h"
 
 NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentials)
@@ -62,11 +63,16 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     configuration.expandedWindowSize = 250;
     configuration.backgroundBatchSize = 250;
     configuration.timelineLimit = 1;
+    configuration.openRoomTimelineLimit = 20;
     configuration.lazyLoadMembers = YES;
     configuration.backgroundHydrationEnabled = YES;
     configuration.listName = @"main";
     configuration.requiredState = @[
         @[@"m.room.member", @"$ME"],
+        // Current member event of every timeline sender: a peer who changed the photo
+        // and then wrote arrives with the new avatar even when timeline_limit=1 hides
+        // the member event itself.
+        @[@"m.room.member", @"$LAZY"],
         @[@"m.room.encryption", @""],
         @[@"m.room.create", @""],
         @[@"m.room.name", @""],
@@ -93,6 +99,7 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
     copy.expandedWindowSize = self.expandedWindowSize;
     copy.backgroundBatchSize = self.backgroundBatchSize;
     copy.timelineLimit = self.timelineLimit;
+    copy.openRoomTimelineLimit = self.openRoomTimelineLimit;
     copy.lazyLoadMembers = self.lazyLoadMembers;
     copy.backgroundHydrationEnabled = self.backgroundHydrationEnabled;
     copy.listName = self.listName;
@@ -109,6 +116,23 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
                                                         timeout:(NSUInteger)timeout
                                                     setPresence:(NSString *)setPresence
 {
+    return [self requestDictionaryWithPosition:position
+                                  connectionId:connectionId
+                                        ranges:ranges
+                             roomSubscriptions:roomIds
+                         openRoomSubscriptions:nil
+                                       timeout:timeout
+                                   setPresence:setPresence];
+}
+
+- (NSDictionary<NSString *,id> *)requestDictionaryWithPosition:(NSString *)position
+                                                   connectionId:(NSString *)connectionId
+                                                         ranges:(NSArray<NSArray<NSNumber *> *> *)ranges
+                                              roomSubscriptions:(NSArray<NSString *> *)roomIds
+                                          openRoomSubscriptions:(NSArray<NSString *> *)openRoomIds
+                                                        timeout:(NSUInteger)timeout
+                                                    setPresence:(NSString *)setPresence
+{
     NSMutableDictionary *request = [NSMutableDictionary dictionary];
     if (position.length) request[@"pos"] = position;
     if (connectionId.length) request[@"conn_id"] = connectionId;
@@ -122,13 +146,22 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
         }
     };
     request[@"extensions"] = self.extensions ?: @{};
-    if (roomIds.count)
+    if (roomIds.count || openRoomIds.count)
     {
-        NSMutableDictionary *subscriptions = [NSMutableDictionary dictionaryWithCapacity:roomIds.count];
+        NSMutableDictionary *subscriptions = [NSMutableDictionary dictionaryWithCapacity:roomIds.count + openRoomIds.count];
         for (NSString *roomId in roomIds)
         {
             subscriptions[roomId] = @{
                 @"timeline_limit": @(MAX(self.timelineLimit, 1)),
+                @"required_state": self.requiredState ?: @[]
+            };
+        }
+        // An open room may also be a plain subscription (opened outside the list window):
+        // the larger limit wins, the server takes one config per subscribed room.
+        for (NSString *roomId in openRoomIds)
+        {
+            subscriptions[roomId] = @{
+                @"timeline_limit": @(MAX(MAX(self.openRoomTimelineLimit, self.timelineLimit), 1)),
                 @"required_state": self.requiredState ?: @[]
             };
         }
@@ -272,14 +305,27 @@ NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId)
         if (!summary && (room[@"heroes"] || room[@"joined_count"] || room[@"invited_count"]))
         {
             NSMutableArray *heroIds = [NSMutableArray array];
+            // The server computes hero avatars from the current member state on every
+            // response. Keep them: a DM whose peer m.room.member fell into a limited
+            // timeline gap would otherwise keep the old photo.
+            NSMutableDictionary *heroAvatars = [NSMutableDictionary dictionary];
             for (id hero in room[@"heroes"] ?: @[])
             {
                 if ([hero isKindOfClass:NSString.class]) [heroIds addObject:hero];
-                else if ([hero isKindOfClass:NSDictionary.class] && hero[@"user_id"]) [heroIds addObject:hero[@"user_id"]];
+                else if ([hero isKindOfClass:NSDictionary.class] && [hero[@"user_id"] isKindOfClass:NSString.class])
+                {
+                    [heroIds addObject:hero[@"user_id"]];
+                    id heroAvatar = hero[@"avatar_url"];
+                    heroAvatars[hero[@"user_id"]] = [heroAvatar isKindOfClass:NSString.class] ? heroAvatar : NSNull.null;
+                }
             }
-            summary = @{@"m.heroes": heroIds,
-                        @"m.joined_member_count": room[@"joined_count"] ?: @0,
-                        @"m.invited_member_count": room[@"invited_count"] ?: @0};
+            NSMutableDictionary *legacySummary = [@{@"m.heroes": heroIds,
+                                                    @"m.joined_member_count": room[@"joined_count"] ?: @0,
+                                                    @"m.invited_member_count": room[@"invited_count"] ?: @0} mutableCopy];
+            if (heroAvatars.count) legacySummary[MXRoomSyncSummarySlidingSyncHeroAvatarsJSONKey] = heroAvatars;
+            id roomAvatar = room[@"avatar"];
+            if ([roomAvatar isKindOfClass:NSString.class]) legacySummary[MXRoomSyncSummarySlidingSyncAvatarJSONKey] = roomAvatar;
+            summary = legacySummary;
         }
         if (summary) legacyRoom[@"summary"] = summary;
         NSArray *roomAccountEvents = roomAccountData[roomId];
@@ -301,15 +347,22 @@ NSString *MXSlidingSyncMembershipForRoom(NSDictionary *room, NSString *userId)
     NSDictionary *toDevice = self.extensions[@"to_device"] ?: @{};
     NSArray *globalAccountData = accountData[@"global"];
     if ([globalAccountData isKindOfClass:NSDictionary.class]) globalAccountData = ((NSDictionary *)globalAccountData)[@"events"];
-    NSDictionary *json = @{
+    NSMutableDictionary *json = [@{
         @"next_batch": self.position ?: @"",
         @"rooms": @{@"join": join, @"invite": invite, @"leave": leave},
         @"to_device": @{@"events": toDevice[@"events"] ?: @[]},
         @"device_lists": e2ee[@"device_lists"] ?: @{},
         @"device_one_time_keys_count": e2ee[@"device_one_time_keys_count"] ?: @{},
-        @"org.matrix.msc2732.device_unused_fallback_key_types": e2ee[@"device_unused_fallback_key_types"] ?: @[],
         @"account_data": @{@"events": globalAccountData ?: @[]}
-    };
+    } mutableCopy];
+    // The server sends the unused fallback key types only at connection start and after the
+    // user's keys change. Absent means "unknown" (nil for the crypto machine), not "none left":
+    // an empty list would ask the crypto machine to upload a new fallback key.
+    id unusedFallbackKeyTypes = e2ee[@"device_unused_fallback_key_types"];
+    if ([unusedFallbackKeyTypes isKindOfClass:NSArray.class])
+    {
+        json[@"org.matrix.msc2732.device_unused_fallback_key_types"] = unusedFallbackKeyTypes;
+    }
     return [MXSyncResponse modelFromJSON:json];
 }
 @end

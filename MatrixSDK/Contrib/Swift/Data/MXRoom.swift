@@ -26,7 +26,13 @@ public extension MXRoom {
     
     /**
      The current state of the room.
+
+     Main actor: a plain `async` method runs on the global executor, so the
+     callback API below was entered off the main thread and raced the main
+     queue over `-[MXRoom liveTimeline:]`'s pending requesters (a crash on
+     copying that array).
      */
+    @MainActor
     func state() async throws -> MXRoomState {
         return try await withCheckedThrowingContinuation { cont in
             state {
@@ -57,10 +63,23 @@ public extension MXRoom {
     
     /**
      The current list of members of the room using async API.
+
+     Main actor for the same reason as `state()`: members go through the live
+     timeline too. The continuation is inline, not `performCallbackRequest`:
+     that helper is a plain `async` function and would leave the main actor
+     again before calling `members(completion:)`.
      */
+    @MainActor
     func members() async throws -> MXRoomMembers? {
-        try await performCallbackRequest {
-            members(completion: $0)
+        try await withCheckedThrowingContinuation { continuation in
+            members { response in
+                switch response {
+                case .success(let members):
+                    continuation.resume(returning: members)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
     
