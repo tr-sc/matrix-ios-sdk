@@ -65,6 +65,11 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         let partial: Bool
     }
     private var lastProgressKey: ProgressKey?
+    /// Inputs of the last complete `localStoreCoverage` answer. Every data update re-fetched
+    /// all stored room IDs on the main context to answer it again; while the server order and
+    /// the stored ID set stay the same, a complete answer stays complete. Incomplete answers
+    /// (hydration) are never cached.
+    private var completeCoverage: (serverOrder: [String], initialIDs: [String]?, networkComplete: Bool)?
     
     private lazy var fetchedResultsController: NSFetchedResultsController<MXRoomSummaryMO> = {
         let request = MXRoomSummaryMO.typedFetchRequest()
@@ -289,12 +294,12 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         let serverOrder = session?.slidingSyncRoomOrder ?? []
         if !serverOrder.isEmpty {
             let rank = Dictionary(uniqueKeysWithValues: serverOrder.enumerated().map { ($1, $0) })
-            mapped.sort {
-                let lhs = rank[$0.roomId] ?? Int.max
-                let rhs = rank[$1.roomId] ?? Int.max
-                if lhs != rhs { return lhs < rhs }
-                return ($0.lastMessage?.originServerTs ?? 0) > ($1.lastMessage?.originServerTs ?? 0)
-            }
+            // Keys are read once per room: inside the comparator every comparison bridged two
+            // `roomId`s from NSString and looked both up, ~17k times for 1.5k rooms per update.
+            mapped = mapped
+                .map { (rank: rank[$0.roomId] ?? Int.max, ts: $0.lastMessage?.originServerTs ?? 0, summary: $0) }
+                .sorted { $0.rank != $1.rank ? $0.rank < $1.rank : $0.ts > $1.ts }
+                .map(\.summary)
         }
         let counts = MXStoreRoomListDataCounts(withRooms: mapped,
                                                total: totalCounts)
@@ -314,6 +319,10 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         let networkComplete = session?.roomListTotalsArePartial != true
         let initialIDs: [String]? = session == nil ? [] : session?.slidingSyncInitialWindowRoomIds
         guard !serverOrder.isEmpty else { return (networkComplete, initialIDs != nil) }
+        if let cached = completeCoverage, cached.networkComplete == networkComplete,
+           cached.initialIDs == initialIDs, cached.serverOrder == serverOrder {
+            return (true, true)
+        }
         let request = NSFetchRequest<NSDictionary>(entityName: MXRoomSummaryMO.entity().name!)
         request.resultType = .dictionaryResultType
         request.propertiesToFetch = ["s_identifier"]
@@ -324,8 +333,12 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
             if networkComplete && !missing.isEmpty {
                 MXLog.debug("[MXCoreDataRoomListDataFetcher] local snapshot incomplete: server=\(serverOrder.count) stored=\(storedIDs.count) missing=\(missing.count)")
             }
-            return (networkComplete && missing.isEmpty,
-                    initialIDs.map { Set($0).isSubset(of: storedIDs) } ?? false)
+            let result = (complete: networkComplete && missing.isEmpty,
+                          initialWindowReady: initialIDs.map { Set($0).isSubset(of: storedIDs) } ?? false)
+            completeCoverage = result.complete && result.initialWindowReady
+                ? (serverOrder, initialIDs, networkComplete)
+                : nil
+            return result
         } catch {
             MXLog.error("[MXCoreDataRoomListDataFetcher] cannot verify local snapshot coverage", context: error)
             return (false, false)
@@ -348,6 +361,12 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
 
     @objc
     private func summaryStoreUpdated(_ notification: Notification) {
+        // The stored ID set changed: the cached complete answer may no longer hold.
+        if notification.userInfo?[NSInsertedObjectsKey] != nil
+            || notification.userInfo?[NSDeletedObjectsKey] != nil
+            || notification.userInfo?[NSInvalidatedAllObjectsKey] != nil {
+            completeCoverage = nil
+        }
         // A section with zero matching rows may receive no FRC callback when
         // the final room belongs to another section. Its completeness must
         // still advance, or Home would stay partial indefinitely.
