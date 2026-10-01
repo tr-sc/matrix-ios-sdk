@@ -22,4 +22,10 @@ protocol MXBackgroundCrypto {
     func handleSyncResponse(_ syncResponse: MXSyncResponse) async
     func canDecryptEvent(_ event: MXEvent) -> Bool
     func decryptEvent(_ event: MXEvent) throws
+    
+    /// Imports the megolm session of an encrypted event from the server-side key backup.
+    ///
+    /// Uses the backup decryption key the main application keeps in the shared crypto store.
+    /// - Returns: whether the session was found in the backup and imported.
+    func importRoomKeyFromBackup(for event: MXEvent) async -> Bool
 }
