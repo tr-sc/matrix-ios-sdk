@@ -29,13 +29,14 @@
 @property (nonatomic) NSString *userId;
 @property (nonatomic) MXRealmAggregationsMapper *mapper;
 
-/// Built once: every lookup used to hit the file system (caches URL, createDirectory).
-@property (nonatomic, nullable) RLMRealmConfiguration *cachedRealmConfiguration;
+/// Prepared once: every lookup used to hit the file system (caches URL, createDirectory).
+/// A preparation or open failure is not kept, so the next lookup prepares it again.
+@property (nonatomic, strong, nullable) RLMRealmConfiguration *cachedRealmConfiguration;
 
 /// Kept alive so Realm keeps the file open. With no live instance each lookup re-opened the
 /// DB (file opens, interprocess mutexes, backup cleanup) — about 1 ms per reaction lookup, on
 /// the main thread while a chat scrolls. Main thread only: RLMRealm is thread-confined.
-@property (nonatomic, nullable) RLMRealm *mainThreadRealm;
+@property (nonatomic, strong, nullable) RLMRealm *mainThreadRealm;
 
 @end
 
@@ -252,15 +253,24 @@
         return self.mainThreadRealm;
     }
 
-    NSError *error;
-    RLMRealm *realm = [RLMRealm realmWithConfiguration:self.realmConfiguration error:&error];
+    NSError *error = nil;
+    RLMRealmConfiguration *configuration = self.realmConfiguration;
+    // Background callers get their own thread-local instance from Realm's factory.
+    RLMRealm *realm = [RLMRealm realmWithConfiguration:configuration error:&error];
 
     if (error)
     {
         MXLogDebug(@"[MXRealmFileProvider] realmForUser gets error: %@", error);
+        // A removed directory or a transient open failure must be retryable.
+        @synchronized (self)
+        {
+            if (self.cachedRealmConfiguration == configuration)
+            {
+                self.cachedRealmConfiguration = nil;
+            }
+        }
     }
-
-    if (isMainThread && realm)
+    else if (isMainThread && realm)
     {
         self.mainThreadRealm = realm;
     }
@@ -274,14 +284,21 @@
     {
         if (!self.cachedRealmConfiguration)
         {
-            self.cachedRealmConfiguration = [self makeRealmConfiguration];
+            NSError *error = nil;
+            RLMRealmConfiguration *configuration = [self prepareRealmConfigurationWithError:&error];
+            if (error)
+            {
+                // Preserve the existing open/error path, but retry preparation
+                // next time rather than keeping a configuration that failed.
+                return configuration;
+            }
+            self.cachedRealmConfiguration = configuration;
         }
-        // A copy per caller: the configuration is a mutable object shared across threads.
-        return [self.cachedRealmConfiguration copy];
+        return self.cachedRealmConfiguration;
     }
 }
 
-- (nonnull RLMRealmConfiguration*)makeRealmConfiguration
+- (nonnull RLMRealmConfiguration*)prepareRealmConfigurationWithError:(NSError **)error
 {
     RLMRealmConfiguration *realmConfiguration = [RLMRealmConfiguration defaultConfiguration];
 
@@ -299,6 +316,7 @@
     if (folderCreationError)
     {
         MXLogDebug(@"[MXScanRealmFileProvider] Fail to create Realm folder %@ with error: %@", realmFileFolderURL, folderCreationError);
+        if (error) *error = folderCreationError;
     }
 
     realmConfiguration.fileURL = realmFileURL;
