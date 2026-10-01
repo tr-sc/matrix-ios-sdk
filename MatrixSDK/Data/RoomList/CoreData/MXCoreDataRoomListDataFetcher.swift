@@ -311,13 +311,23 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
         let syncState = currentSlidingSyncState
         let serverOrder = syncState.order
         if !serverOrder.isEmpty {
-            let rank = Dictionary(uniqueKeysWithValues: serverOrder.enumerated().map { ($1, $0) })
+            let rank: [String: Int] = Dictionary(uniqueKeysWithValues: serverOrder.enumerated().map { ($1, $0) })
             // Keys are read once per room: inside the comparator every comparison bridged two
             // `roomId`s from NSString and looked both up, ~17k times for 1.5k rooms per update.
-            mapped = mapped
-                .map { (rank: rank[$0.roomId] ?? Int.max, ts: $0.lastMessage?.originServerTs ?? 0, summary: $0) }
-                .sorted { $0.rank != $1.rank ? $0.rank < $1.rank : $0.ts > $1.ts }
-                .map(\.summary)
+            // Spelled out with explicit types: as one chained expression Swift 6.2 (Xcode 26.3 on
+            // CI) gave up type-checking it "in reasonable time".
+            var ranked: [(rank: Int, ts: UInt64, summary: MXRoomSummary)] = []
+            ranked.reserveCapacity(mapped.count)
+            for summary in mapped {
+                let position: Int = rank[summary.roomId] ?? Int.max
+                let ts: UInt64 = summary.lastMessage?.originServerTs ?? 0
+                ranked.append((rank: position, ts: ts, summary: summary))
+            }
+            ranked.sort { lhs, rhs in
+                if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
+                return lhs.ts > rhs.ts
+            }
+            mapped = ranked.map { $0.summary }
         }
         let counts = MXStoreRoomListDataCounts(withRooms: mapped,
                                                total: totalCounts)
