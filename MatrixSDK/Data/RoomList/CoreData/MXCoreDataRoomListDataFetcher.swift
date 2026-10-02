@@ -314,10 +314,17 @@ internal class MXCoreDataRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
             let rank = Dictionary(uniqueKeysWithValues: serverOrder.enumerated().map { ($1, $0) })
             // Keys are read once per room: inside the comparator every comparison bridged two
             // `roomId`s from NSString and looked both up, ~17k times for 1.5k rooms per update.
-            mapped = mapped
-                .map { (rank: rank[$0.roomId] ?? Int.max, ts: $0.lastMessage?.originServerTs ?? 0, summary: $0) }
-                .sorted { $0.rank != $1.rank ? $0.rank < $1.rank : $0.ts > $1.ts }
-                .map(\.summary)
+            let ranked: [(rank: Int, ts: UInt64, summary: MXRoomSummary)] = mapped.map { summary in
+                let roomRank: Int = rank[summary.roomId] ?? Int.max
+                let ts: UInt64 = summary.lastMessage?.originServerTs ?? 0
+                return (rank: roomRank, ts: ts, summary: summary)
+            }
+            mapped = ranked
+                .sorted { (lhs, rhs) -> Bool in
+                    if lhs.rank != rhs.rank { return lhs.rank < rhs.rank }
+                    return lhs.ts > rhs.ts
+                }
+                .map { $0.summary }
         }
         let counts = MXStoreRoomListDataCounts(withRooms: mapped,
                                                total: totalCounts)
