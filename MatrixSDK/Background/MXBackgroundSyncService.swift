@@ -248,7 +248,13 @@ public enum MXBackgroundSyncServiceError: Error {
                 completion(.failure(error))
                 return
             case .success(let roomAccountData):
-                self._event(withEventId: roomAccountData.readMarkerEventId, inRoom: roomId, allowSync: false, completion: completion)
+                // `readMarkerEventId` is imported as `String!`. A room has account data without
+                // m.fully_read when only its tags were set (pinned, archived) and reading only sends m.read.
+                guard let readMarkerEventId = roomAccountData.readMarkerEventId else {
+                    completion(.failure(MXBackgroundSyncServiceError.unknown))
+                    return
+                }
+                self._event(withEventId: readMarkerEventId, inRoom: roomId, allowSync: false, completion: completion)
             }
         }
     }
