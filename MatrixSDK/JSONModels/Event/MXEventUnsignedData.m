@@ -35,6 +35,7 @@
             MXJSONModelSetUInteger(unsignedData.age, JSONDictionary[@"age"]);
         }
 
+        MXJSONModelSetUInt64(unsignedData->_trscExpiresAt, JSONDictionary[@"im.trsc.expires_at"]);
         MXJSONModelSetString(unsignedData->_replacesState, JSONDictionary[@"replaces_state"]);
         MXJSONModelSetString(unsignedData->_prevSender, JSONDictionary[@"prev_sender"]);
         MXJSONModelSetDictionary(unsignedData->_prevContent, JSONDictionary[@"prev_content"]);
@@ -55,6 +56,10 @@
         if (_ageLocalTs != -1)
         {
             JSONDictionary[@"age"] = @(self.age);
+        }
+        if (_trscExpiresAt)
+        {
+            JSONDictionary[@"im.trsc.expires_at"] = @(_trscExpiresAt);
         }
         if (_replacesState)
         {
@@ -98,6 +103,7 @@
     if (self)
     {
         _ageLocalTs = (uint64_t)[aDecoder decodeInt64ForKey:@"ageLocalTs"];
+        _trscExpiresAt = (uint64_t)[aDecoder decodeInt64ForKey:@"trscExpiresAt"];
         _replacesState = [aDecoder decodeObjectForKey:@"replacesState"];
         _prevSender = [aDecoder decodeObjectForKey:@"prevSender"];
         _prevContent = [aDecoder decodeObjectForKey:@"prevContent"];
@@ -112,6 +118,7 @@
 - (void)encodeWithCoder:(NSCoder *)aCoder
 {
     [aCoder encodeInt64:(int64_t)_ageLocalTs forKey:@"ageLocalTs"];
+    [aCoder encodeInt64:(int64_t)_trscExpiresAt forKey:@"trscExpiresAt"];
     [aCoder encodeObject:_replacesState forKey:@"replacesState"];
     [aCoder encodeObject:_prevSender forKey:@"prevSender"];
     [aCoder encodeObject:_prevContent forKey:@"prevContent"];

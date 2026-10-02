@@ -40,6 +40,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) uint64_t ageLocalTs;
 
 /**
+ TRSC auto-delete: `unsigned["im.trsc.expires_at"]`, the moment in milliseconds (server clock) at which the
+ homeserver redacts this event. 0 when the event is not auto-deleted.
+ */
+@property (nonatomic, readonly) uint64_t trscExpiresAt;
+
+/**
  The event id of the state event this event replaces.
  */
 @property (nonatomic, readonly, nullable) NSString *replacesState;
