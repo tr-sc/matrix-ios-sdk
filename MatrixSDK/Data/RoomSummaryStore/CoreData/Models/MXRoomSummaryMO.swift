@@ -184,7 +184,7 @@ extension MXRoomSummaryMO: MXRoomSummaryProtocol {
     }
     
     public var aliases: [String] {
-        return s_aliases?.components(separatedBy: StringArrayDelimiter) ?? []
+        return Self.strings(from: s_aliases)
     }
     
     public var historyVisibility: String? {
@@ -293,10 +293,7 @@ extension MXRoomSummaryMO: MXRoomSummaryProtocol {
     }
     
     public var parentSpaceIds: Set<String> {
-        if let array = s_parentSpaceIds?.components(separatedBy: StringArrayDelimiter) {
-            return Set<String>(array)
-        }
-        return []
+        return Set<String>(Self.strings(from: s_parentSpaceIds))
     }
     
     public var trust: MXUsersTrustLevelSummary? {
@@ -307,9 +304,14 @@ extension MXRoomSummaryMO: MXRoomSummaryProtocol {
     }
     
     public var userIdsSharingLiveBeacon: Set<String> {
-        guard let userIds = s_userIdsSharingLiveBeacon?.components(separatedBy: StringArrayDelimiter) else {
+        return Set<String>(Self.strings(from: s_userIdsSharingLiveBeacon))
+    }
+    
+    /// An empty array is stored as "", which `components(separatedBy:)` reads back as [""].
+    private static func strings(from joined: String?) -> [String] {
+        guard let joined, !joined.isEmpty else {
             return []
         }
-        return Set<String>(userIds)
+        return joined.components(separatedBy: StringArrayDelimiter)
     }
 }
