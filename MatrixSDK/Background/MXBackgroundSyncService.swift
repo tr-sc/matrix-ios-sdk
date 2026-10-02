@@ -61,6 +61,10 @@ public enum MXBackgroundSyncServiceError: Error {
     /// Cached profiles. UserId -> (displayName, avatarUrl)
     private var cachedProfiles: [String: (String?, String?)] = [:]
     
+    /// Megolm sessions (`roomId|sessionId`) the key backup lookups already gave up on. The next pushes of
+    /// a burst wait in `asyncTaskQueue` behind the first one, so they look the session up once, without retries.
+    private var keyBackupMisses: Set<String> = []
+    
     /// See MXSyncResponseStoreManager.syncResponseCacheSizeLimit
     public var syncResponseCacheSizeLimit: Int {
         get {
@@ -285,6 +289,9 @@ public enum MXBackgroundSyncServiceError: Error {
                 self.decryptUsingKeyBackup(event, attempt: 0, deadline: keyBackupDeadline) { decrypted in
                     if !decrypted {
                         MXLog.debug("[MXBackgroundSyncService] fetchEvent: No key for \(eventId), returning it encrypted.")
+                        if let missKey = MXBackgroundSyncService.keyBackupMissKey(for: event) {
+                            self.keyBackupMisses.insert(missKey)
+                        }
                     }
                     Queues.dispatchQueue.async {
                         completion(.success(event))
@@ -401,7 +408,7 @@ public enum MXBackgroundSyncServiceError: Error {
     }
     
     /// Imports the event's room key from the key backup and decrypts the event, retrying with
-    /// `Constants.keyBackupRetryDelays` until `deadline`.
+    /// `Constants.keyBackupRetryDelays` until `deadline` while the session may still appear in the backup.
     /// - Parameter completion: called with whether the event got decrypted.
     private func decryptUsingKeyBackup(_ event: MXEvent,
                                        attempt: Int,
@@ -414,9 +421,21 @@ public enum MXBackgroundSyncServiceError: Error {
                 completion(true)
                 return
             }
-            if await self.crypto.importRoomKeyFromBackup(for: event), self.decryptIfPossible(event) {
+            let lookup = await self.crypto.importRoomKeyFromBackup(for: event)
+            if lookup == .imported, self.decryptIfPossible(event) {
                 MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: Decrypted \(event.eventId ?? "") with a key from the key backup, attempt \(attempt)")
                 completion(true)
+                return
+            }
+            //  no backup key, a replaced backup: waiting would only hold up the pushes queued behind this one
+            guard lookup == .notYetAvailable else {
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: The key backup cannot decrypt \(event.eventId ?? ""), not retrying")
+                completion(false)
+                return
+            }
+            if let missKey = MXBackgroundSyncService.keyBackupMissKey(for: event), self.keyBackupMisses.contains(missKey) {
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: An earlier push already waited for the session of \(event.eventId ?? ""), not retrying")
+                completion(false)
                 return
             }
             guard attempt < Constants.keyBackupRetryDelays.count else {
@@ -433,6 +452,13 @@ public enum MXBackgroundSyncServiceError: Error {
                 self.decryptUsingKeyBackup(event, attempt: attempt + 1, deadline: deadline, completion: completion)
             }
         }
+    }
+    
+    private static func keyBackupMissKey(for event: MXEvent) -> String? {
+        guard let roomId = event.roomId, let sessionId = event.content["session_id"] as? String else {
+            return nil
+        }
+        return roomId + "|" + sessionId
     }
     
     private func decryptIfPossible(_ event: MXEvent) -> Bool {

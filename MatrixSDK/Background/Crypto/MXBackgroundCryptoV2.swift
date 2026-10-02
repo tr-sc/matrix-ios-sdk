@@ -29,6 +29,9 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
     private let credentials: MXCredentials
     private let restClient: MXRestClient
     private let log = MXNamedLog(name: "MXBackgroundCryptoV2")
+    /// The stored backup version last compared with the server's current one, so that a burst of
+    /// misses asks the server once.
+    private var checkedBackupVersion: (version: String, isCurrent: Bool)?
     
     init(credentials: MXCredentials, restClient: MXRestClient) {
         self.credentials = credentials
@@ -115,14 +118,14 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
         }
     }
     
-    func importRoomKeyFromBackup(for event: MXEvent) async -> Bool {
+    func importRoomKeyFromBackup(for event: MXEvent) async -> MXBackgroundKeyBackupLookup {
         let eventId = event.eventId ?? ""
         guard
             event.isEncrypted,
             let roomId = event.roomId,
             let sessionId = event.content["session_id"] as? String
         else {
-            return false
+            return .unavailable
         }
         
         do {
@@ -132,7 +135,7 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
             // here instead (PBKDF2, 500k rounds) does not fit the extension's memory and time limits.
             guard let backupKeys = machine.backupKeys else {
                 log.debug("No key backup private key in the crypto store, cannot look up session `\(sessionId)`")
-                return false
+                return .unavailable
             }
             let version = backupKeys.backupVersion()
             
@@ -140,9 +143,14 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
             do {
                 keyBackupData = try await self.keyBackupData(sessionId: sessionId, roomId: roomId, version: version)
             } catch {
-                // 404 until a device of the user that has this session uploads it.
+                // 404 until a device of the user that has this session uploads it. Also 404 forever when the
+                // stored key belongs to a backup that was deleted or replaced on another device.
+                guard await isCurrentBackupVersion(version) else {
+                    log.debug("Key backup v\(version) is no longer the current one, cannot look up session `\(sessionId)`")
+                    return .unavailable
+                }
                 log.debug("Session `\(sessionId)` of event `\(eventId)` is not in key backup v\(version)")
-                return false
+                return .notYetAvailable
             }
             
             guard let sessionData = decrypt(
@@ -151,15 +159,46 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
                 sessionId: sessionId,
                 roomId: roomId
             ) else {
-                return false
+                return .unavailable
             }
             
+            // 0 imported when the store already has this session, e.g. the main application got it meanwhile.
             let result = try machine.importDecryptedKeys(roomKeys: [sessionData], progressListener: BackupImportProgressListener())
             log.debug("Imported \(result.imported)/\(result.total) keys of session `\(sessionId)` from key backup v\(version)")
-            return result.imported > 0
+            return .imported
         } catch {
             log.error("Failed importing a room key from key backup", context: error)
-            return false
+            return .notYetAvailable
+        }
+    }
+    
+    /// Whether `version` is still the server's current key backup. True when that cannot be told.
+    private func isCurrentBackupVersion(_ version: String) async -> Bool {
+        if let checked = checkedBackupVersion, checked.version == version {
+            return checked.isCurrent
+        }
+        let isCurrent: Bool
+        do {
+            let currentVersion = try await currentKeyBackupVersion()
+            isCurrent = currentVersion == version
+        } catch {
+            guard let mxError = MXError(nsError: error as NSError), mxError.errcode == kMXErrCodeStringNotFound else {
+                return true
+            }
+            // No key backup on the server at all.
+            isCurrent = false
+        }
+        checkedBackupVersion = (version: version, isCurrent: isCurrent)
+        return isCurrent
+    }
+    
+    private func currentKeyBackupVersion() async throws -> String? {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = restClient.keyBackupVersion(nil, success: { keyBackupVersion in
+                continuation.resume(returning: keyBackupVersion?.version)
+            }, failure: { error in
+                continuation.resume(throwing: error ?? Error.missingKeyBackupData)
+            })
         }
     }
     
