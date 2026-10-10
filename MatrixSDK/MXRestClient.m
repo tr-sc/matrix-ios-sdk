@@ -1354,6 +1354,36 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
                                  }];
 }
 
+- (MXHTTPOperation *)openIdTokenForAudience:(NSString *)audience
+                                    success:(void (^)(MXOpenIdToken *))success
+                                    failure:(void (^)(NSError *))failure
+{
+    // The stable path: Tuwunel does not serve the unstable one that `openIdToken:failure:` asks on.
+    NSString *path = [NSString stringWithFormat:@"%@/user/%@/openid/request_token", kMXAPIPrefixPathV3, credentials.userId];
+
+    MXWeakify(self);
+    return [httpClient requestWithMethod:@"POST"
+                                    path:path
+                              parameters:@{@"tr.sc.audience": audience}
+                                 success:^(NSDictionary *JSONResponse) {
+                                     MXStrongifyAndReturnIfNil(self);
+
+                                     if (success)
+                                     {
+                                         __block MXOpenIdToken *openIdToken;
+                                         [self dispatchProcessing:^{
+                                             MXJSONModelSetMXJSONModel(openIdToken, MXOpenIdToken, JSONResponse);
+                                         } andCompletion:^{
+                                             success(openIdToken);
+                                         }];
+                                     }
+                                 }
+                                 failure:^(NSError *error) {
+                                     MXStrongifyAndReturnIfNil(self);
+                                     [self dispatchFailure:error inBlock:failure];
+                                 }];
+}
+
 
 #pragma mark - 3pid token request
 

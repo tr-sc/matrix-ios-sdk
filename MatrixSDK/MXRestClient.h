@@ -709,6 +709,22 @@ NS_REFINED_FOR_SWIFT;
 - (MXHTTPOperation*)openIdToken:(void (^)(MXOpenIdToken *tokenObject))success
                         failure:(void (^)(NSError *error))failure;
 
+/**
+ The same token, asked for one service only (TRSC): `POST /_matrix/client/v3/user/{userId}/openid/request_token`
+ with `{"tr.sc.audience": audience}`. The homeserver keeps the audience with the token, and a service that
+ checks it accepts only a token made for it, so one handed to a call server or an integration manager
+ cannot be traded for that service's session. Those keep asking with `openIdToken:failure:`.
+
+ @param audience the name of the service: lower case letters, digits, '-', '.' and '_' (e.g. "channel-svc").
+ @param success A block object called when the operation succeeds.
+ @param failure A block object called when the operation fails.
+
+ @return a MXHTTPOperation instance.
+ */
+- (MXHTTPOperation*)openIdTokenForAudience:(NSString*)audience
+                                   success:(void (^)(MXOpenIdToken *tokenObject))success
+                                   failure:(void (^)(NSError *error))failure;
+
 
 #pragma mark - 3pid token request
 /**
