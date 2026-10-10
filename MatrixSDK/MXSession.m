@@ -84,6 +84,7 @@ NSString *const kMXSessionNotificationErrorKey = @"error";
 NSString *const kMXSessionNotificationUserIdsArrayKey = @"userIds";
 
 NSString *const kMXSessionNoRoomTag = @"m.recent";  // Use the same value as matrix-react-sdk
+NSString *const kMXTrscChannelsSyncExtensionKey = @"tr.sc.channels";
 
 /**
  Default timeouts used by the events streams.
@@ -274,6 +275,10 @@ typedef void (^MXOnResumeDone)(void);
 @property (nonatomic, strong) NSMutableDictionary<NSString *, void (^)(NSError *)> *slidingSyncSubscriptionFailures;
 @property (nonatomic, copy) void (^slidingSyncRoomListReadyCallback)(void);
 @property (nonatomic) BOOL slidingSyncDidFallback;
+/** TRSC channels: a Sliding Sync request with a timeout is waiting for its answer. */
+@property (nonatomic) BOOL trscSlidingSyncLongPollInFlight;
+/** TRSC channels: the last answer moved only the extension; such cycles are not logged. */
+@property (nonatomic) BOOL trscLastAnswerWasFastPath;
 
 @end
 
@@ -2086,12 +2091,103 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         MXLogDebug(@"[MXSession][SlidingSync] list_refresh request loaded=%tu total=%tu rangeEnd=%tu",
                    self.slidingSyncRoomOrder.count, self.slidingSyncTotalRoomCount, self.slidingSyncRangeEnd);
     }
-    return [self.slidingSyncConfiguration requestDictionaryWithPosition:position
-                                                          connectionId:connectionId
-                                                                ranges:@[@[@0, @(self.slidingSyncRangeEnd)]]
-                                                     roomSubscriptions:refresh ? nil : self.slidingSyncSubscriptions.allObjects
-                                                 openRoomSubscriptions:refresh ? nil : self.slidingSyncOpenRooms.allObjects
-                                                               timeout:serverTimeout setPresence:setPresence];
+    NSDictionary *request = [self.slidingSyncConfiguration requestDictionaryWithPosition:position
+                                                                           connectionId:connectionId
+                                                                                 ranges:@[@[@0, @(self.slidingSyncRangeEnd)]]
+                                                                      roomSubscriptions:refresh ? nil : self.slidingSyncSubscriptions.allObjects
+                                                                  openRoomSubscriptions:refresh ? nil : self.slidingSyncOpenRooms.allObjects
+                                                                                timeout:serverTimeout setPresence:setPresence];
+    // TRSC channels: asked for on every request and never written into the configuration, so the
+    // cursor and the open channels are always the current ones.
+    NSDictionary *channels = [self.trscChannelsDelegate trscChannelsExtensionForSession:self];
+    if (!channels.count) return request;
+    NSMutableDictionary *withChannels = request.mutableCopy;
+    NSMutableDictionary *extensions = [request[@"extensions"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    extensions[kMXTrscChannelsSyncExtensionKey] = channels;
+    withChannels[@"extensions"] = extensions;
+    return withChannels;
+}
+
+/**
+ TRSC channels: hands the extension of an answer to the delegate.
+
+ @return YES for an answer in which nothing but the extension moved (same `pos`, no rooms, no lists,
+ no other extension): it is not converted, handled or stored.
+ */
+- (BOOL)handleTrscChannelsInSlidingSyncResponse:(MXSlidingSyncResponse *)response
+                              requestedChannels:(BOOL)requestedChannels
+                              requestedPosition:(NSString *)requestedPosition
+{
+    id<MXTrscChannelsSyncDelegate> delegate = self.trscChannelsDelegate;
+    if (!delegate) return NO;
+    id channels = response.extensions[kMXTrscChannelsSyncExtensionKey];
+    if (![channels isKindOfClass:NSDictionary.class])
+    {
+        if (requestedChannels) [delegate trscChannelsSessionDidReceiveAnswerWithoutExtension:self];
+        return NO;
+    }
+    BOOL fastPath = requestedPosition.length
+        && [requestedPosition isEqualToString:response.position]
+        && !response.rooms.count
+        && !response.lists.count
+        && response.extensions.count == 1;
+    [delegate session:self didReceiveTrscChannelsExtension:channels fastPath:fastPath];
+    return fastPath;
+}
+
+/** TRSC channels: whether a failed request to sync-edge says anything about sync-edge. */
+- (BOOL)shouldReportTrscChannelsSyncFailure:(NSError *)error
+{
+    if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return NO;
+    if ([self isSlidingSyncUnknownPositionError:error]) return NO;
+    // Offline every host fails; that is no reason to leave the one in use.
+    return [AFNetworkReachabilityManager sharedManager].isReachable;
+}
+
+- (void)trscChannelsRestartLongPoll
+{
+    if (!self.trscSlidingSyncLongPollInFlight || !self.slidingSyncConfiguration || !eventStreamRequest) return;
+    if (self.state != MXSessionStateRunning) return;
+    MXLogDebug(@"[MXSession][SlidingSync] long-poll restarted for the channels extension");
+    self.trscSlidingSyncLongPollInFlight = NO;
+    // A new identifier first: the cancelled request's answer, whichever comes, is then ignored.
+    self.slidingSyncRequestIdentifier = NSUUID.UUID.UUIDString;
+    [eventStreamRequest cancel];
+    [self serverSlidingSyncWithServerTimeout:([self canRefreshSlidingSyncList] ? 0 : SERVER_TIMEOUT_MS) success:nil failure:nil setPresence:self.preferredSyncPresenceString];
+}
+
+/**
+ What follows a handled answer: the next window of background hydration, or the next long-poll.
+ `success` is the caller's of the first request.
+ */
+- (void)continueSlidingSyncAfterResponseWithRequestIdentifier:(NSString *)requestIdentifier
+                                                       success:(void (^)(void))success
+                                                       failure:(void (^)(NSError *error))failure
+                                                   setPresence:(NSString *)setPresence
+{
+    NSUInteger total = self.slidingSyncTotalRoomCount;
+    if (self.slidingSyncConfiguration.backgroundHydrationEnabled && self.roomListReady && self.slidingSyncRangeEnd + 1 < total)
+    {
+        NSUInteger expandedEnd = MAX(self.slidingSyncConfiguration.expandedWindowSize, 1) - 1;
+        if (self.slidingSyncRangeEnd < expandedEnd) self.slidingSyncRangeEnd = MIN(expandedEnd, total - 1);
+        else self.slidingSyncRangeEnd = MIN(self.slidingSyncRangeEnd + MAX(self.slidingSyncConfiguration.backgroundBatchSize, 1), total - 1);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (self->eventStreamRequest && [self.slidingSyncRequestIdentifier isEqual:requestIdentifier] && self.state != MXSessionStatePaused && self.state != MXSessionStatePauseRequested)
+                    [self serverSlidingSyncWithServerTimeout:0 success:success failure:failure setPresence:setPresence];
+            });
+        });
+        return;
+    }
+
+    if (self.state != MXSessionStatePauseRequested && self.state != MXSessionStatePaused)
+    {
+        [self setState:MXSessionStateRunning];
+        os_signpost_event_emit(os_log_create("org.matrix.sdk", "SlidingSyncStartup"), OS_SIGNPOST_ID_EXCLUSIVE, "running");
+        [self serverSlidingSyncWithServerTimeout:([self canRefreshSlidingSyncList] ? 0 : SERVER_TIMEOUT_MS) success:nil failure:nil setPresence:self.preferredSyncPresenceString];
+    }
+    if (success) success();
 }
 
 - (void)serverSlidingSyncWithServerTimeout:(NSUInteger)serverTimeout
@@ -2108,14 +2204,32 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
     NSDate *startedAt = NSDate.date;
     NSUInteger requestedRangeEnd = self.slidingSyncRangeEnd;
     NSString *requestedPosition = request[@"pos"];
-    MXLogDebug(@"[MXSession][SlidingSync] request range=0..%tu timeout=%tu loaded=%tu total=%tu hydration=%@ position=%@",
-               requestedRangeEnd, [request[@"timeout"] unsignedIntegerValue], self.slidingSyncRoomOrder.count, self.slidingSyncTotalRoomCount,
-               self.slidingSyncConfiguration.backgroundHydrationEnabled ? @"YES" : @"NO",
-               requestedPosition.length ? @"present" : @"missing");
+    BOOL requestedChannels = request[@"extensions"][kMXTrscChannelsSyncExtensionKey] != nil;
+    NSString *syncBaseURL = [self.trscChannelsDelegate trscChannelsSyncBaseURLForSession:self];
+    self.trscSlidingSyncLongPollInFlight = [request[@"timeout"] unsignedIntegerValue] > 0;
+    if (!self.trscLastAnswerWasFastPath)
+    {
+        MXLogDebug(@"[MXSession][SlidingSync] request range=0..%tu timeout=%tu loaded=%tu total=%tu hydration=%@ position=%@ host=%@",
+                   requestedRangeEnd, [request[@"timeout"] unsignedIntegerValue], self.slidingSyncRoomOrder.count, self.slidingSyncTotalRoomCount,
+                   self.slidingSyncConfiguration.backgroundHydrationEnabled ? @"YES" : @"NO",
+                   requestedPosition.length ? @"present" : @"missing",
+                   syncBaseURL.length ? @"sync-edge" : @"homeserver");
+    }
     MXWeakify(self);
-    eventStreamRequest = [matrixRestClient slidingSyncWithRequest:request success:^(MXSlidingSyncResponse *response) {
+    eventStreamRequest = [matrixRestClient slidingSyncWithRequest:request baseURL:syncBaseURL success:^(MXSlidingSyncResponse *response) {
         MXStrongifyAndReturnIfNil(self);
         if (!self->eventStreamRequest || ![self.slidingSyncRequestIdentifier isEqual:requestIdentifier]) return;
+        self.trscSlidingSyncLongPollInFlight = NO;
+        if (syncBaseURL) [self.trscChannelsDelegate session:self trscChannelsSyncRequestToBaseURL:syncBaseURL didCompleteWithError:nil];
+        // TRSC channels fast path: only the extension moved. Matrix has nothing to convert, handle
+        // or persist (FR-APP-SYN-01), so the loop goes straight on.
+        BOOL fastPath = [self handleTrscChannelsInSlidingSyncResponse:response requestedChannels:requestedChannels requestedPosition:requestedPosition];
+        self.trscLastAnswerWasFastPath = fastPath;
+        if (fastPath)
+        {
+            [self continueSlidingSyncAfterResponseWithRequestIdentifier:requestIdentifier success:success failure:failure setPresence:setPresence];
+            return;
+        }
         os_log_t log = os_log_create("org.matrix.sdk", "SlidingSyncStartup");
         os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "first_response_received");
         MXLogDebug(@"[MXSession][SlidingSync] response received in %.0fms at pos %@", [NSDate.date timeIntervalSinceDate:startedAt] * 1000, response.position);
@@ -2175,29 +2289,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                         [self joinPendingRoomInvites];
                     }
 
-                    NSUInteger total = self.slidingSyncTotalRoomCount;
-                    if (self.slidingSyncConfiguration.backgroundHydrationEnabled && self.roomListReady && self.slidingSyncRangeEnd + 1 < total)
-                    {
-                        NSUInteger expandedEnd = MAX(self.slidingSyncConfiguration.expandedWindowSize, 1) - 1;
-                        if (self.slidingSyncRangeEnd < expandedEnd) self.slidingSyncRangeEnd = MIN(expandedEnd, total - 1);
-                        else self.slidingSyncRangeEnd = MIN(self.slidingSyncRangeEnd + MAX(self.slidingSyncConfiguration.backgroundBatchSize, 1), total - 1);
-                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
-                                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                            dispatch_async(dispatch_get_main_queue(), ^{
-                                if (self->eventStreamRequest && [self.slidingSyncRequestIdentifier isEqual:requestIdentifier] && self.state != MXSessionStatePaused && self.state != MXSessionStatePauseRequested)
-                                    [self serverSlidingSyncWithServerTimeout:0 success:success failure:failure setPresence:setPresence];
-                            });
-                        });
-                        return;
-                    }
-
-                    if (self.state != MXSessionStatePauseRequested && self.state != MXSessionStatePaused)
-                    {
-                        [self setState:MXSessionStateRunning];
-                        os_signpost_event_emit(log, OS_SIGNPOST_ID_EXCLUSIVE, "running");
-                        [self serverSlidingSyncWithServerTimeout:([self canRefreshSlidingSyncList] ? 0 : SERVER_TIMEOUT_MS) success:nil failure:nil setPresence:self.preferredSyncPresenceString];
-                    }
-                    if (success) success();
+                    [self continueSlidingSyncAfterResponseWithRequestIdentifier:requestIdentifier success:success failure:failure setPresence:setPresence];
                 } updateEventStreamToken:NO];
             };
 
@@ -2236,13 +2328,26 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
     } failure:^(NSError *error) {
         MXStrongifyAndReturnIfNil(self);
         if (![self.slidingSyncRequestIdentifier isEqual:requestIdentifier]) return;
+        self.trscSlidingSyncLongPollInFlight = NO;
+        self.trscLastAnswerWasFastPath = NO;
+        // TRSC channels: a failure of sync-edge goes to the delegate, which may move to another
+        // host (a node to the shared name, the shared name to the homeserver) and ask to resend now.
+        if (syncBaseURL && [self shouldReportTrscChannelsSyncFailure:error]
+            && [self.trscChannelsDelegate session:self trscChannelsSyncRequestToBaseURL:syncBaseURL didCompleteWithError:error]
+            && self->eventStreamRequest)
+        {
+            MXLogWarning(@"[MXSession][SlidingSync] sync host failed (%@); resending to the next one", error);
+            [self serverSlidingSyncWithServerTimeout:0 success:success failure:failure setPresence:setPresence];
+            return;
+        }
         if ([self isSlidingSyncUnknownPositionError:error])
         {
             MXLogWarning(@"[MXSession][SlidingSync] UnknownPos; starting a new connection without deleting summaries");
             [self resetSlidingSyncStateForUnknownPosition];
             [self serverSlidingSyncWithServerTimeout:0 success:success failure:failure setPresence:setPresence];
         }
-        else if (!self.slidingSyncDidFallback && [self shouldFallbackFromSlidingSyncError:error])
+        // An error of sync-edge says nothing about Sliding Sync on the homeserver: no fallback for it.
+        else if (!syncBaseURL && !self.slidingSyncDidFallback && [self shouldFallbackFromSlidingSyncError:error])
         {
             self.slidingSyncDidFallback = YES;
             MXLogWarning(@"[MXSession][SlidingSync] endpoint unavailable (%@); falling back to /sync", error);
@@ -2253,6 +2358,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
             self.roomListState = nil;
             [[NSNotificationCenter defaultCenter] postNotificationName:MXSessionSlidingSyncRoomOrderDidChangeNotification object:self];
             self.roomListReady = self.isEventStreamInitialised;
+            [self.trscChannelsDelegate trscChannelsSessionDidFallBackToLegacySync:self];
             void (^startLegacySync)(void) = ^{
                 [self serverSyncWithServerTimeout:0 success:success failure:failure clientTimeout:CLIENT_TIMEOUT_MS setPresence:setPresence];
             };
@@ -5722,6 +5828,12 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         MXStrongifyAndReturnIfNil(self);
 
         [self.store storeHomeserverWellknown:wellKnown];
+
+        id<MXTrscChannelsSyncDelegate> channelsDelegate = self.trscChannelsDelegate;
+        if ([channelsDelegate respondsToSelector:@selector(trscChannelsSessionDidRefreshHomeserverWellknown:)])
+        {
+            [channelsDelegate trscChannelsSessionDidRefreshHomeserverWellknown:self];
+        }
 
         if (success)
         {

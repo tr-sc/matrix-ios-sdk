@@ -136,6 +136,12 @@ MXAuthAction;
      HTTP client to the antivirus server.
      */
     MXHTTPClient *antivirusHttpClient;
+
+    /**
+     TRSC: HTTP clients to the hosts that serve Sliding Sync besides the home server (sync-edge),
+     by base URL. Never dropped while the rest client lives: a dropped client cancels its request.
+     */
+    NSMutableDictionary<NSString *, MXHTTPClient *> *trscSyncHttpClients;
     
     /**
      The queue to process server response.
@@ -464,6 +470,7 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     credentials = nil;
     httpClient = nil;
     antivirusHttpClient = nil;
+    trscSyncHttpClients = nil;
     
     processingQueue = nil;
     completionQueue = nil;
@@ -4138,6 +4145,30 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
                                     success:(void (^)(MXSlidingSyncResponse *))success
                                     failure:(void (^)(NSError *))failure
 {
+    return [self slidingSyncWithRequest:request baseURL:nil success:success failure:failure];
+}
+
+- (MXHTTPClient *)trscSyncHTTPClientForBaseURL:(NSString *)baseURL
+{
+    MXHTTPClient *client = trscSyncHttpClients[baseURL];
+    if (client || !httpClient) return client;
+
+    // No block for unrecognized certificates: sync-edge has a public certificate, and a
+    // certificate the user once allowed for the home server must not open another host.
+    client = [[MXHTTPClient alloc] initWithBaseURL:baseURL authenticated:YES andOnUnrecognizedCertificateBlock:nil];
+    client.tokenValidationResponseHandler = httpClient.tokenValidationResponseHandler;
+    client.tokenProviderHandler = httpClient.tokenProviderHandler;
+    if (!trscSyncHttpClients) trscSyncHttpClients = [NSMutableDictionary dictionary];
+    trscSyncHttpClients[baseURL] = client;
+    return client;
+}
+
+- (MXHTTPOperation *)slidingSyncWithRequest:(NSDictionary<NSString *,id> *)request
+                                    baseURL:(NSString *)baseURL
+                                    success:(void (^)(MXSlidingSyncResponse *))success
+                                    failure:(void (^)(NSError *))failure
+{
+    MXHTTPClient *client = baseURL.length ? [self trscSyncHTTPClientForBaseURL:baseURL] : httpClient;
     NSMutableDictionary *body = request.mutableCopy;
     NSMutableArray<NSString *> *query = [NSMutableArray array];
     NSString *position = body[@"pos"];
@@ -4151,10 +4182,10 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     if (query.count) path = [path stringByAppendingFormat:@"?%@", [query componentsJoinedByString:@"&"]];
 
     MXWeakify(self);
-    return [httpClient requestWithMethod:@"POST"
-                                    path:path
-                              parameters:body
-                                 success:^(NSDictionary *JSONResponse) {
+    MXHTTPOperation *operation = [client requestWithMethod:@"POST"
+                                                      path:path
+                                                parameters:body
+                                                   success:^(NSDictionary *JSONResponse) {
         MXStrongifyAndReturnIfNil(self);
         if (!success) return;
         __block MXSlidingSyncResponse *response;
@@ -4167,6 +4198,11 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
         MXStrongifyAndReturnIfNil(self);
         [self dispatchFailure:error inBlock:failure];
     }];
+    // A host other than the home server answers its failure after one retry rather than after
+    // minutes of them: the session moves to another host instead (`MXTrscChannelsSyncDelegate`).
+    // While the network is down the client still waits for it, as for the home server.
+    if (client != httpClient) operation.maxNumberOfTries = 2;
+    return operation;
 }
 
 - (MXHTTPOperation *)syncFromToken:(NSString*)token

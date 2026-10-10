@@ -2155,6 +2155,18 @@ NS_REFINED_FOR_SWIFT;
                                     success:(void (^)(MXSlidingSyncResponse *syncResponse))success
                                     failure:(void (^)(NSError *error))failure NS_REFINED_FOR_SWIFT;
 
+/**
+ The same request to another host that serves the Sliding Sync path (TRSC sync-edge), with this
+ client's access token and token refresh. The certificate is checked by the system only. One
+ HTTP client is kept per base URL, so moving between hosts never cancels a request in flight.
+
+ @param baseURL `https://host` without a path; nil sends the request to the homeserver.
+ */
+- (MXHTTPOperation *)slidingSyncWithRequest:(NSDictionary<NSString *, id> *)request
+                                    baseURL:(nullable NSString *)baseURL
+                                    success:(void (^)(MXSlidingSyncResponse *syncResponse))success
+                                    failure:(void (^)(NSError *error))failure NS_REFINED_FOR_SWIFT;
+
 
 #pragma mark - Directory operations
 /**

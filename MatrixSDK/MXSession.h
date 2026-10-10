@@ -354,6 +354,7 @@ FOUNDATION_EXPORT NSString *const kMXSessionNoRoomTag;
 @class MXSessionStartupProgress;
 @class MXSlidingSyncConfiguration;
 @class MXSlidingSyncRoomListState;
+@protocol MXTrscChannelsSyncDelegate;
 
 #pragma mark - MXSession
 /**
@@ -611,6 +612,20 @@ FOUNDATION_EXPORT NSString *const kMXSessionNoRoomTag;
 
 /** Balance a `subscribeOpenRoomWithRoomId:` call. */
 - (void)unsubscribeOpenRoomWithRoomId:(NSString *)roomId;
+
+/**
+ TRSC channels: what every Sliding Sync request adds and where it goes (see
+ `MXTrscChannelsSyncDelegate`). Held weakly; nil keeps Sliding Sync exactly as without it.
+ */
+@property (nonatomic, weak, nullable) id<MXTrscChannelsSyncDelegate> trscChannelsDelegate;
+
+/**
+ Abort the pending Sliding Sync long-poll and send a fresh request now, so the server sees a new
+ extension object (the set of open channels changed). Does nothing unless a long-poll is waiting
+ for its answer: a request being processed or about to be sent carries the new object anyway.
+ Main thread.
+ */
+- (void)trscChannelsRestartLongPoll;
 
 /**
  Start the session like `[MXSession start]` but with using a filter in /sync requests.
