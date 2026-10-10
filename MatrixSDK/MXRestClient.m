@@ -4200,8 +4200,14 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     }];
     // A host other than the home server answers its failure after one retry rather than after
     // minutes of them: the session moves to another host instead (`MXTrscChannelsSyncDelegate`).
-    // While the network is down the client still waits for it, as for the home server.
-    if (client != httpClient) operation.maxNumberOfTries = 2;
+    // The total bounds the rate-limit and token-refresh retries too: a draining sync-edge node
+    // answers 503 M_LIMIT_EXCEEDED, and the move must not wait 20 s of those. While the network is
+    // down the client still waits for it, as for the home server.
+    if (client != httpClient)
+    {
+        operation.maxNumberOfTries = 2;
+        operation.maxTotalAttempts = @2;
+    }
     return operation;
 }
 
