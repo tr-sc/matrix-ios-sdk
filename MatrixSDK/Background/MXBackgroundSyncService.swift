@@ -35,6 +35,13 @@ public enum MXBackgroundSyncServiceError: Error {
         static let syncRequestServerTimout: UInt = 0
         static let syncRequestClientTimout: UInt = 20 * 1000
         static let syncRequestPresence: String = "offline"
+        /// Pauses between the key backup lookups for an event we have no key for. Another device of
+        /// the user uploads a room key 0-10 s after receiving it (`MXKeyBackup`), so a miss right after
+        /// the push is often a hit a few seconds later.
+        static let keyBackupRetryDelays: [TimeInterval] = [3, 4, 4]
+        /// No key backup lookup starts later than this after `event(withEventId:)` was called: a
+        /// notification extension has about 30 s per push and still has to build the notification.
+        static let keyBackupLookupBudget: TimeInterval = 14
     }
     
     private let processingQueue: DispatchQueue
@@ -53,6 +60,10 @@ public enum MXBackgroundSyncServiceError: Error {
     
     /// Cached profiles. UserId -> (displayName, avatarUrl)
     private var cachedProfiles: [String: (String?, String?)] = [:]
+    
+    /// Megolm sessions (`roomId|sessionId`) the key backup lookups already gave up on. The next pushes of
+    /// a burst wait in `asyncTaskQueue` behind the first one, so they look the session up once, without retries.
+    private var keyBackupMisses: Set<String> = []
     
     /// See MXSyncResponseStoreManager.syncResponseCacheSizeLimit
     public var syncResponseCacheSizeLimit: Int {
@@ -99,7 +110,13 @@ public enum MXBackgroundSyncServiceError: Error {
         syncPushRuleManagerWithAccountData()
     }
     
-    /// Fetch event with given event and room identifiers. It performs a sync if the event not found in session store.
+    /// Fetch event with given event and room identifiers. It performs a sync if the event not found in session store,
+    /// and falls back to the /event API when there is nothing to sync from (the main application uses Sliding Sync,
+    /// which never stores a /sync token).
+    ///
+    /// An encrypted event we have no key for is looked up in the server-side key backup, a few times within
+    /// `Constants.keyBackupLookupBudget`. If it still cannot be decrypted, it is returned encrypted (`clear` is nil)
+    /// so that the caller can still tell who sent it.
     /// - Parameters:
     ///   - eventId: The event identifier for the desired event
     ///   - roomId: The room identifier for the desired event
@@ -111,10 +128,13 @@ public enum MXBackgroundSyncServiceError: Error {
                       completion: @escaping (MXResponse<MXEvent>) -> Void) {
         // Process one request at a time
         let stopwatch = MXStopwatch()
+        // Counted from the call, not from the start of processing: a push queued behind another one
+        // must not spend its own time budget on lookups.
+        let keyBackupDeadline = Date().addingTimeInterval(Constants.keyBackupLookupBudget)
         asyncTaskQueue.async { (taskCompleted) in
             MXLog.debug("[MXBackgroundSyncService] event: Start processing \(eventId) after waiting for \(stopwatch.readable())")
             
-            self._event(withEventId: eventId, inRoom: roomId, allowSync: allowSync) { response in
+            self._event(withEventId: eventId, inRoom: roomId, allowSync: allowSync, keyBackupDeadline: keyBackupDeadline) { response in
                 completion(response)
                 taskCompleted()
             }
@@ -232,16 +252,25 @@ public enum MXBackgroundSyncServiceError: Error {
                 completion(.failure(error))
                 return
             case .success(let roomAccountData):
-                self._event(withEventId: roomAccountData.readMarkerEventId, inRoom: roomId, allowSync: false, completion: completion)
+                // `readMarkerEventId` is imported as `String!`. A room has account data without
+                // m.fully_read when only its tags were set (pinned, archived) and reading only sends m.read.
+                guard let readMarkerEventId = roomAccountData.readMarkerEventId else {
+                    completion(.failure(MXBackgroundSyncServiceError.unknown))
+                    return
+                }
+                self._event(withEventId: readMarkerEventId, inRoom: roomId, allowSync: false, completion: completion)
             }
         }
     }
     
     //  MARK: - Private
     
+    /// - Parameter keyBackupDeadline: when set, an event we have no key for is looked up in the key backup
+    ///   until this date, and returned still encrypted if that fails too. When nil, it is a decryption failure.
     private func _event(withEventId eventId: String,
                         inRoom roomId: String,
                         allowSync: Bool,
+                        keyBackupDeadline: Date? = nil,
                         completion: @escaping (MXResponse<MXEvent>) -> Void) {
         MXLog.debug("[MXBackgroundSyncService] fetchEvent: \(eventId). allowSync: \(allowSync)")
         
@@ -251,10 +280,23 @@ public enum MXBackgroundSyncServiceError: Error {
         }
         
         /// Inline function to handle decryption failure
-        func handleDecryptionFailure(withError error: Error?) {
+        func handleDecryptionFailure(forEvent event: MXEvent, withError error: Error?) {
             if allowSync {
                 MXLog.debug("[MXBackgroundSyncService] fetchEvent: Launch a background sync.")
-                self.launchBackgroundSync(forEventId: eventId, roomId: roomId, completion: completion)
+                self.launchBackgroundSync(forEventId: eventId, roomId: roomId, keyBackupDeadline: keyBackupDeadline, completion: completion)
+            } else if let keyBackupDeadline = keyBackupDeadline {
+                MXLog.debug("[MXBackgroundSyncService] fetchEvent: Do not sync anymore. Look up the key in the key backup.")
+                self.decryptUsingKeyBackup(event, attempt: 0, deadline: keyBackupDeadline) { decrypted in
+                    if !decrypted {
+                        MXLog.debug("[MXBackgroundSyncService] fetchEvent: No key for \(eventId), returning it encrypted.")
+                        if let missKey = MXBackgroundSyncService.keyBackupMissKey(for: event) {
+                            self.keyBackupMisses.insert(missKey)
+                        }
+                    }
+                    Queues.dispatchQueue.async {
+                        completion(.success(event))
+                    }
+                }
             } else {
                 MXLog.debug("[MXBackgroundSyncService] fetchEvent: Do not sync anymore.")
                 Queues.dispatchQueue.async {
@@ -297,12 +339,12 @@ public enum MXBackgroundSyncServiceError: Error {
                     }
                 } catch let error {
                     MXLog.debug("[MXBackgroundSyncService] fetchEvent: Decryption failed even crypto claimed it has the keys.")
-                    handleDecryptionFailure(withError: error)
+                    handleDecryptionFailure(forEvent: event, withError: error)
                 }
             } else {
                 //  we don't have keys to decrypt the event
                 MXLog.debug("[MXBackgroundSyncService] fetchEvent: Event needs to be decrypted, but we don't have the keys to decrypt it.")
-                handleDecryptionFailure(withError: nil)
+                handleDecryptionFailure(forEvent: event, withError: nil)
             }
         }
         
@@ -327,7 +369,7 @@ public enum MXBackgroundSyncServiceError: Error {
                 handleEncryption(forEvent: event)
             } else if allowSync {
                 MXLog.debug("[MXBackgroundSyncService] fetchEvent: We don't have the event in stores. Launch a background sync to fetch it.")
-                self.launchBackgroundSync(forEventId: eventId, roomId: roomId, completion: completion)
+                self.launchBackgroundSync(forEventId: eventId, roomId: roomId, keyBackupDeadline: keyBackupDeadline, completion: completion)
             } else {
                 // Final fallback, try with /event API
                 MXLog.debug("[MXBackgroundSyncService] fetchEvent: We still don't have the event in stores. Try with /event API")
@@ -342,6 +384,11 @@ public enum MXBackgroundSyncServiceError: Error {
                     switch response {
                         case .success(let event):
                             MXLog.debug("[MXBackgroundSyncService] fetchEvent: We got the event from /event API")
+                            
+                            //  the room is in the path, decryption and the notification need it on the event
+                            if event.roomId == nil {
+                                event.roomId = roomId
+                            }
                             
                             //  cache this event
                             self.cachedEvents[eventId] = event
@@ -360,15 +407,83 @@ public enum MXBackgroundSyncServiceError: Error {
         }
     }
     
+    /// Imports the event's room key from the key backup and decrypts the event, retrying with
+    /// `Constants.keyBackupRetryDelays` until `deadline` while the session may still appear in the backup.
+    /// - Parameter completion: called with whether the event got decrypted.
+    private func decryptUsingKeyBackup(_ event: MXEvent,
+                                       attempt: Int,
+                                       deadline: Date,
+                                       completion: @escaping (Bool) -> Void) {
+        Task {
+            //  the main application may have received the key meanwhile (it keeps syncing for a while
+            //  in the background), it is in the shared crypto store then
+            if attempt > 0, self.decryptIfPossible(event) {
+                completion(true)
+                return
+            }
+            let lookup = await self.crypto.importRoomKeyFromBackup(for: event)
+            if lookup == .imported, self.decryptIfPossible(event) {
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: Decrypted \(event.eventId ?? "") with a key from the key backup, attempt \(attempt)")
+                completion(true)
+                return
+            }
+            //  no backup key, a replaced backup: waiting would only hold up the pushes queued behind this one
+            guard lookup == .notYetAvailable else {
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: The key backup cannot decrypt \(event.eventId ?? ""), not retrying")
+                completion(false)
+                return
+            }
+            if let missKey = MXBackgroundSyncService.keyBackupMissKey(for: event), self.keyBackupMisses.contains(missKey) {
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: An earlier push already waited for the session of \(event.eventId ?? ""), not retrying")
+                completion(false)
+                return
+            }
+            guard attempt < Constants.keyBackupRetryDelays.count else {
+                completion(false)
+                return
+            }
+            let delay = Constants.keyBackupRetryDelays[attempt]
+            guard Date().addingTimeInterval(delay) < deadline else {
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: Out of time after attempt \(attempt)")
+                completion(false)
+                return
+            }
+            self.processingQueue.asyncAfter(deadline: .now() + delay) {
+                self.decryptUsingKeyBackup(event, attempt: attempt + 1, deadline: deadline, completion: completion)
+            }
+        }
+    }
+    
+    private static func keyBackupMissKey(for event: MXEvent) -> String? {
+        guard let roomId = event.roomId, let sessionId = event.content["session_id"] as? String else {
+            return nil
+        }
+        return roomId + "|" + sessionId
+    }
+    
+    private func decryptIfPossible(_ event: MXEvent) -> Bool {
+        guard crypto.canDecryptEvent(event) else {
+            return false
+        }
+        do {
+            try crypto.decryptEvent(event)
+            return true
+        } catch {
+            return false
+        }
+    }
+    
     private func launchBackgroundSync(forEventId eventId: String,
                                       roomId: String,
+                                      keyBackupDeadline: Date?,
                                       completion: @escaping (MXResponse<MXEvent>) -> Void) {
             
         guard let eventStreamToken = syncResponseStoreManager.nextSyncToken() ?? store.eventStreamToken else {
-            MXLog.debug("[MXBackgroundSyncService] launchBackgroundSync: Do not sync because event streaming not started yet.")
-            Queues.dispatchQueue.async {
-                completion(.failure(MXBackgroundSyncServiceError.unknown))
-            }
+            // A Sliding Sync session never stores a /sync token, so there is never anything to sync
+            // from. Fetch the event alone instead, and decrypt it with the keys the main
+            // application put into the shared crypto store.
+            MXLog.debug("[MXBackgroundSyncService] launchBackgroundSync: No /sync token. Fetch the event with /event API.")
+            self._event(withEventId: eventId, inRoom: roomId, allowSync: false, keyBackupDeadline: keyBackupDeadline, completion: completion)
             return
         }
         
@@ -396,14 +511,14 @@ public enum MXBackgroundSyncServiceError: Error {
                        !self.crypto.canDecryptEvent(event),
                        (syncResponse.toDevice?.events ?? []).count > 0 {
                         //  we got the event but not the keys to decrypt it. continue to sync
-                        self.launchBackgroundSync(forEventId: eventId, roomId: roomId, completion: completion)
+                        self.launchBackgroundSync(forEventId: eventId, roomId: roomId, keyBackupDeadline: keyBackupDeadline, completion: completion)
                     } else {
                         //  do not allow to sync anymore
-                        self._event(withEventId: eventId, inRoom: roomId, allowSync: false, completion: completion)
+                        self._event(withEventId: eventId, inRoom: roomId, allowSync: false, keyBackupDeadline: keyBackupDeadline, completion: completion)
                     }
                 }
             case .failure(let error):
-                guard let _ = self else {
+                guard let self = self else {
                     MXLog.debug("[MXBackgroundSyncService] launchBackgroundSync: MXRestClient.syncFromToken returned too late with error: \(String(describing: error))")
                     Queues.dispatchQueue.async {
                         completion(.failure(error))
@@ -411,9 +526,8 @@ public enum MXBackgroundSyncServiceError: Error {
                     return
                 }
                 MXLog.debug("[MXBackgroundSyncService] launchBackgroundSync: MXRestClient.syncFromToken returned with error: \(String(describing: error))")
-                Queues.dispatchQueue.async {
-                    completion(.failure(error))
-                }
+                //  the /event API still knows the event, e.g. when the stored /sync token is too old to sync from
+                self._event(withEventId: eventId, inRoom: roomId, allowSync: false, keyBackupDeadline: keyBackupDeadline, completion: completion)
             }
         }
     }

@@ -23,11 +23,15 @@ import MatrixSDKCrypto
 class MXBackgroundCryptoV2: MXBackgroundCrypto {
     enum Error: Swift.Error {
         case missingCredentials
+        case missingKeyBackupData
     }
     
     private let credentials: MXCredentials
     private let restClient: MXRestClient
     private let log = MXNamedLog(name: "MXBackgroundCryptoV2")
+    /// The stored backup version last compared with the server's current one, so that a burst of
+    /// misses asks the server once.
+    private var checkedBackupVersion: (version: String, isCurrent: Bool)?
     
     init(credentials: MXCredentials, restClient: MXRestClient) {
         self.credentials = credentials
@@ -114,6 +118,139 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
         }
     }
     
+    func importRoomKeyFromBackup(for event: MXEvent) async -> MXBackgroundKeyBackupLookup {
+        let eventId = event.eventId ?? ""
+        guard
+            event.isEncrypted,
+            let roomId = event.roomId,
+            let sessionId = event.content["session_id"] as? String
+        else {
+            return .unavailable
+        }
+        
+        do {
+            let machine = try createMachine()
+            // The main application saves the backup private key next to its version when it
+            // creates, trusts or restores the backup (`MXKeyBackup`). Deriving it from a passphrase
+            // here instead (PBKDF2, 500k rounds) does not fit the extension's memory and time limits.
+            guard let backupKeys = machine.backupKeys else {
+                log.debug("No key backup private key in the crypto store, cannot look up session `\(sessionId)`")
+                return .unavailable
+            }
+            let version = backupKeys.backupVersion()
+            
+            let keyBackupData: MXKeyBackupData
+            do {
+                keyBackupData = try await self.keyBackupData(sessionId: sessionId, roomId: roomId, version: version)
+            } catch {
+                // 404 until a device of the user that has this session uploads it. Also 404 forever when the
+                // stored key belongs to a backup that was deleted or replaced on another device.
+                guard await isCurrentBackupVersion(version) else {
+                    log.debug("Key backup v\(version) is no longer the current one, cannot look up session `\(sessionId)`")
+                    return .unavailable
+                }
+                log.debug("Session `\(sessionId)` of event `\(eventId)` is not in key backup v\(version)")
+                return .notYetAvailable
+            }
+            
+            guard let sessionData = decrypt(
+                keyBackupData: keyBackupData,
+                recoveryKey: backupKeys.recoveryKey(),
+                sessionId: sessionId,
+                roomId: roomId
+            ) else {
+                return .unavailable
+            }
+            
+            // 0 imported when the store already has this session, e.g. the main application got it meanwhile.
+            let result = try machine.importDecryptedKeys(roomKeys: [sessionData], progressListener: BackupImportProgressListener())
+            log.debug("Imported \(result.imported)/\(result.total) keys of session `\(sessionId)` from key backup v\(version)")
+            return .imported
+        } catch {
+            log.error("Failed importing a room key from key backup", context: error)
+            return .notYetAvailable
+        }
+    }
+    
+    /// Whether `version` is still the server's current key backup. True when that cannot be told.
+    private func isCurrentBackupVersion(_ version: String) async -> Bool {
+        if let checked = checkedBackupVersion, checked.version == version {
+            return checked.isCurrent
+        }
+        let isCurrent: Bool
+        do {
+            let currentVersion = try await currentKeyBackupVersion()
+            isCurrent = currentVersion == version
+        } catch {
+            guard let mxError = MXError(nsError: error as NSError), mxError.errcode == kMXErrCodeStringNotFound else {
+                return true
+            }
+            // No key backup on the server at all.
+            isCurrent = false
+        }
+        checkedBackupVersion = (version: version, isCurrent: isCurrent)
+        return isCurrent
+    }
+    
+    private func currentKeyBackupVersion() async throws -> String? {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = restClient.keyBackupVersion(nil, success: { keyBackupVersion in
+                continuation.resume(returning: keyBackupVersion?.version)
+            }, failure: { error in
+                continuation.resume(throwing: error ?? Error.missingKeyBackupData)
+            })
+        }
+    }
+    
+    private func keyBackupData(sessionId: String, roomId: String, version: String) async throws -> MXKeyBackupData {
+        try await withCheckedThrowingContinuation { continuation in
+            _ = restClient.keyBackup(forSession: sessionId, inRoom: roomId, version: version, success: { keyBackupData in
+                if let keyBackupData {
+                    continuation.resume(returning: keyBackupData)
+                } else {
+                    continuation.resume(throwing: Error.missingKeyBackupData)
+                }
+            }, failure: { error in
+                continuation.resume(throwing: error ?? Error.missingKeyBackupData)
+            })
+        }
+    }
+    
+    /// Same as `MXCryptoKeyBackupEngine.decrypt`, which needs a whole key backup engine.
+    private func decrypt(
+        keyBackupData: MXKeyBackupData,
+        recoveryKey: BackupRecoveryKey,
+        sessionId: String,
+        roomId: String
+    ) -> MXMegolmSessionData? {
+        guard
+            let ciphertext = keyBackupData.sessionData["ciphertext"] as? String,
+            let mac = keyBackupData.sessionData["mac"] as? String,
+            let ephemeral = keyBackupData.sessionData["ephemeral"] as? String
+        else {
+            log.error("Missing session data properties")
+            return nil
+        }
+        
+        do {
+            let plaintext = try recoveryKey.decryptV1(ephemeralKey: ephemeral, mac: mac, ciphertext: ciphertext)
+            guard
+                let json = MXTools.deserialiseJSONString(plaintext) as? [AnyHashable: Any],
+                let data = MXMegolmSessionData(fromJSON: json)
+            else {
+                log.error("Failed serializing data")
+                return nil
+            }
+            data.sessionId = sessionId
+            data.roomId = roomId
+            data.isUntrusted = true // Asymmetric backups are untrusted by default
+            return data
+        } catch {
+            log.error("Failed decrypting backup data", context: error)
+            return nil
+        }
+    }
+    
     // `MXCryptoMachine` will load the same store as the main application meaning that background and foreground
     // sync services have access to the same data / keys. The machine is not fully multi-thread and multi-process
     // safe, and until this is resolved we open a new instance of `MXCryptoMachine` on each background operation
@@ -137,4 +274,9 @@ class MXBackgroundCryptoV2: MXBackgroundCrypto {
             }
         )
     }
+}
+
+/// A single session is imported at a time, there is no progress worth reporting.
+private final class BackupImportProgressListener: ProgressListener {
+    func onProgress(progress: Int32, total: Int32) {}
 }
