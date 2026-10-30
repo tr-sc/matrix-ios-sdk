@@ -140,4 +140,19 @@
  */
 @property (nonatomic) NSAttributedString *partialAttributedTextMessage;
 
+@property (nonatomic, copy) NSArray<MXRoomHistoryGap *> *historyGaps;
+@property (nonatomic) NSUInteger historyRevision;
+@property (nonatomic, readonly) NSArray<MXEvent *> *continuousRecentMessages;
+- (void)storeHistoryGap:(MXRoomHistoryGap *)gap;
+- (void)removeHistoryGapWithId:(NSString *)gapId;
+- (void)insertHistoryEvents:(NSArray<MXEvent *> *)events beforeEventId:(NSString *)eventId;
+- (NSArray<MXEvent *> *)historyBlockBeforeGap:(MXRoomHistoryGap *)gap NS_SWIFT_NAME(historyBlock(beforeGap:));
+- (void)applyHistoryGap:(MXRoomHistoryGap *)gap events:(NSArray<MXEvent *> *)events nextToken:(NSString *)token;
+/** Общая область архивации/фиксации с live-сообщениями; объединение в плоский список требует доказательства перекрытия. */
+@property (nonatomic, copy) NSArray<MXRoomHistoryContext *> *historyContexts;
+@property (nonatomic, copy) NSString *historyContextGeneration;
+@property (nonatomic) uint64_t historyContextRetentionTimestamp;
+- (MXRoomHistoryContext *)historyContextForEventId:(NSString *)eventId filter:(NSDictionary *)filter;
+- (BOOL)storeHistoryContext:(MXRoomHistoryContext *)context expectedGeneration:(NSString *)generation expectedRoomRevision:(NSUInteger)roomRevision expectedComponentRevision:(NSUInteger)componentRevision;
+
 @end

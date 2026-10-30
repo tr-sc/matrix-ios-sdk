@@ -18,6 +18,7 @@
  */
 
 #import "MXRoomSummary.h"
+#import "MXHTTPOperation_Private.h"
 
 #import "MXRoom.h"
 #import "MXRoomState.h"
@@ -390,14 +391,29 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
         operation = [[MXHTTPOperation alloc] init];
     }
     
+    if (operation.isCancelled)
+    {
+        if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
+        return operation;
+    }
     // Get the room timeline
     if (!timeline)
     {
+        MXHTTPProcessingLease *timelineLease = [operation beginProcessing];
         [room liveTimeline:^(id<MXEventTimeline> liveTimeline) {
-            // Use a copy of the live timeline to avoid any conflicts with listeners to the unique live timeline
-            id<MXEventTimeline> timeline = [liveTimeline copyWithZone:nil];
-            [timeline resetPagination];
-            [self fetchLastMessageWithMaxServerPaginationCount:maxServerPaginationCount onComplete:onComplete failure:failure timeline:timeline operation:operation commit:commit];
+            @try
+            {
+                if (operation.isCancelled)
+                {
+                    if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
+                    return;
+                }
+                // Use a copy of the live timeline to avoid any conflicts with listeners to the unique live timeline
+                id<MXEventTimeline> timeline = [liveTimeline copyWithZone:nil];
+                [timeline resetPagination];
+                [self fetchLastMessageWithMaxServerPaginationCount:maxServerPaginationCount onComplete:onComplete failure:failure timeline:timeline operation:operation commit:commit];
+            }
+            @finally { [timelineLease finish]; }
         }];
         return operation;
     }

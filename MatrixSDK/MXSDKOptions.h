@@ -56,6 +56,9 @@ NS_ASSUME_NONNULL_BEGIN
 @interface MXSDKOptions : NSObject
 
 + (MXSDKOptions *)sharedInstance;
+/** Сохранять несвязанные блоки только для Sliding Sync. По умолчанию NO.
+ Классическая синхронизация и независимая предзагрузка приложения не затрагиваются. */
+@property (nonatomic) BOOL preserveHistoryOnSlidingSyncGaps;
 
 /**
  By default Matrix SDK sets an identicon url when user's avatar is undefined

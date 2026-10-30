@@ -28,7 +28,7 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
     self = [self init];
     if (self)
     {
-        messages = [aDecoder decodeObjectForKey:@"messages"];
+        messages = [[aDecoder decodeObjectForKey:@"messages"] mutableCopy] ?: [NSMutableArray array];
 
         self.paginationToken = [aDecoder decodeObjectForKey:@"paginationToken"];
 
@@ -64,6 +64,12 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
 
         self.partialAttributedTextMessage = [aDecoder decodeObjectForKey:@"partialAttributedTextMessage"];
 
+        self.historyGaps = [aDecoder decodeObjectForKey:@"historyGapsV1"] ?: @[];
+        self.historyContexts = [aDecoder decodeObjectForKey:@"historyContextsV1"] ?: @[];
+        self.historyContextGeneration = [aDecoder decodeObjectForKey:@"historyContextGenerationV1"] ?: self.historyContextGeneration;
+        self.historyContextRetentionTimestamp = (uint64_t)[aDecoder decodeInt64ForKey:@"historyContextRetentionV1"];
+        self.historyRevision = [aDecoder containsValueForKey:@"historyRevisionV1"] ? [aDecoder decodeIntegerForKey:@"historyRevisionV1"] : 1;
+
         // Rebuild the messagesByEventIds cache
         for (MXEvent *event in messages)
         {
@@ -84,6 +90,11 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
     snapshot.backwardPaginationState = self.backwardPaginationState;
     snapshot.hasLoadedAllRoomMembersForRoom = self.hasLoadedAllRoomMembersForRoom;
     snapshot.partialAttributedTextMessage = self.partialAttributedTextMessage;
+    snapshot.historyGaps = self.historyGaps;
+    snapshot.historyContexts = self.historyContexts;
+    snapshot.historyContextGeneration = self.historyContextGeneration;
+    snapshot.historyContextRetentionTimestamp = self.historyContextRetentionTimestamp;
+    snapshot.historyRevision = self.historyRevision;
     return snapshot;
 }
 
@@ -101,6 +112,11 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
         [aCoder encodeObject:self.paginationToken forKey:@"paginationToken"];
     }
     
+    [aCoder encodeObject:self.historyGaps forKey:@"historyGapsV1"];
+    [aCoder encodeObject:self.historyContexts forKey:@"historyContextsV1"];
+    [aCoder encodeObject:self.historyContextGeneration forKey:@"historyContextGenerationV1"];
+    [aCoder encodeInt64:(int64_t)self.historyContextRetentionTimestamp forKey:@"historyContextRetentionV1"];
+    [aCoder encodeInteger:self.historyRevision forKey:@"historyRevisionV1"];
     [aCoder encodeInteger:self.backwardPaginationState forKey:kMXFileRoomStoreBackwardPaginationStateV1Key];
     [aCoder encodeBool:self.backwardPaginationState == MXRoomBackwardPaginationStateExhausted
                 forKey:kMXFileRoomStoreLegacyPaginationEndKey];

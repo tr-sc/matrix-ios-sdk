@@ -657,4 +657,54 @@
     return store;
 }
 
+- (NSArray<MXRoomHistoryGap *> *)historyGapsForRoom:(NSString *)roomId
+{
+    return [[self getOrCreateRoomStore:roomId] historyGaps];
+}
+- (NSUInteger)historyRevisionForRoom:(NSString *)roomId
+{
+    return [[self getOrCreateRoomStore:roomId] historyRevision];
+}
+- (NSArray<MXEvent *> *)continuousRecentMessagesForRoom:(NSString *)roomId
+{
+    return [[self getOrCreateRoomStore:roomId] continuousRecentMessages];
+}
+- (void)storeHistoryGap:(MXRoomHistoryGap *)gap forRoom:(NSString *)roomId
+{
+    [[self getOrCreateRoomStore:roomId] storeHistoryGap:gap];
+}
+- (void)removeHistoryGapWithId:(NSString *)gapId inRoom:(NSString *)roomId
+{
+    [[self getOrCreateRoomStore:roomId] removeHistoryGapWithId:gapId];
+}
+- (void)insertHistoryEvents:(NSArray<MXEvent *> *)events inRoom:(NSString *)roomId beforeEventId:(NSString *)eventId
+{
+    [[self getOrCreateRoomStore:roomId] insertHistoryEvents:events beforeEventId:eventId];
+}
+- (NSArray<MXEvent *> *)historyBlockBeforeGap:(MXRoomHistoryGap *)gap inRoom:(NSString *)roomId
+{
+    return [[self getOrCreateRoomStore:roomId] historyBlockBeforeGap:gap];
+}
+- (void)applyHistoryGap:(MXRoomHistoryGap *)gap inRoom:(NSString *)roomId events:(NSArray<MXEvent *> *)events nextToken:(NSString *)token
+{
+    [[self getOrCreateRoomStore:roomId] applyHistoryGap:gap events:events nextToken:token];
+}
+- (NSArray<MXRoomHistoryContext *> *)historyContextsForRoom:(NSString *)roomId
+{
+    return [[self getOrCreateRoomStore:roomId] historyContexts];
+}
+- (MXRoomHistoryContext *)historyContextForEventId:(NSString *)eventId inRoom:(NSString *)roomId filter:(NSDictionary *)filter
+{
+    return [[self getOrCreateRoomStore:roomId] historyContextForEventId:eventId filter:filter];
+}
+- (NSString *)historyContextGenerationForRoom:(NSString *)roomId
+{
+    return [roomStores[roomId] historyContextGeneration];
+}
+- (BOOL)storeHistoryContext:(MXRoomHistoryContext *)context inRoom:(NSString *)roomId expectedGeneration:(NSString *)generation expectedRoomRevision:(NSUInteger)roomRevision expectedComponentRevision:(NSUInteger)componentRevision
+{
+    // Никогда не загружаем и не создаём комнату при запоздалой записи после deleteRoom/deleteAllData.
+    MXMemoryRoomStore *existing = roomStores[roomId];
+    return [existing storeHistoryContext:context expectedGeneration:generation expectedRoomRevision:roomRevision expectedComponentRevision:componentRevision];
+}
 @end
