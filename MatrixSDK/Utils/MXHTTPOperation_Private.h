@@ -3,7 +3,16 @@
 
 #import "MXHTTPOperation.h"
 
+// Аренда обработки владеет одним физическим этапом. Освобождение отброшенного обратного вызова также освобождает
+// его аренду; finish безопасно вызывать повторно. Физические этапы переживают логическую
+// отмену; отменённое продолжение завершается, когда оно больше не может выполняться.
+@interface MXHTTPProcessingLease : NSObject
+- (void)finish;
+@end
+
 @interface MXHTTPOperation (HTTPClient)
+- (MXHTTPProcessingLease *)beginProcessing;
+- (dispatch_block_t)processingBlock:(dispatch_block_t)block;
 - (void)setHTTPCancellationHandler:(dispatch_block_t)handler;
 - (void)setHTTPRetryCancellation:(dispatch_block_t)cancellation;
 // Logical-request cleanup, independent of replaceable per-attempt retry timers.

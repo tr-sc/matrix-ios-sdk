@@ -53,6 +53,48 @@ typedef NS_ENUM(NSUInteger, MXRoomBackwardPaginationState)
  The `MXStore` protocol defines an interface that must be implemented in order to store
  Matrix data handled during a `MXSession`.
  */
+/** Несвязанный интервал. Опорные точки — идентификаторы событий, а не метки времени.
+ Копии, возвращаемые хранилищами, являются снимками. recoveryBlocked приостанавливает непригодные курсоры;
+ это не означает, что интервал связан или история исчерпана. */
+@interface MXRoomHistoryGap : NSObject <NSCoding, NSCopying>
+@property (nonatomic, copy, nonnull) NSString *gapId;
+@property (nonatomic, copy, nonnull) NSString *olderAnchorEventId;
+@property (nonatomic, copy, nonnull) NSString *newerAnchorEventId;
+@property (nonatomic, copy, nullable) NSString *backwardToken;
+@property (nonatomic) BOOL recoveryBlocked;
+@end
+
+/** Сохраняемый компонент целевого окна. Возвращаемые дескрипторы — глубокие снимки; вызывающий код
+ не должен считать эти события частью live-хранилища. Связанные границы обозначают
+ доказанное соединение независимо от того, может ли курсор сейчас загружать страницы. */
+@interface MXRoomHistoryContext : NSObject <NSCoding, NSCopying>
+/** Каноническое покрытие владеет независимыми неизменяемыми корнями воспроизведения. У корневых записей
+ replayRoots пуст; их componentId — стабильный идентификатор корня. */
+@property (nonatomic, copy, nonnull) NSArray<MXRoomHistoryContext *> *replayRoots;
+@property (nonatomic, copy, nullable) NSString *selectedRootId;
+@property (nonatomic, copy, nullable) NSString *backwardRootId;
+@property (nonatomic, copy, nullable) NSString *forwardRootId;
+@property (nonatomic, copy, nonnull) NSString *componentId;
+@property (nonatomic, copy, nonnull) NSString *targetEventId;
+@property (nonatomic, copy, nonnull) NSArray<MXEvent *> *events;
+@property (nonatomic, copy, nonnull) NSArray<MXEvent *> *initialEvents;
+@property (nonatomic, copy, nullable) NSString *initialAnchorEventId;
+@property (nonatomic, copy, nonnull) NSArray<NSString *> *initialBackwardEventIds;
+@property (nonatomic, copy, nonnull) NSArray<MXEvent *> *initialState;
+/** Каждое обновление содержит direction, events и state; воспроизведение идёт в порядке фиксации. */
+@property (nonatomic, copy, nonnull) NSArray<NSDictionary *> *pageUpdates;
+@property (nonatomic, copy, nonnull) NSDictionary *filter;
+@property (nonatomic, copy, nullable) NSString *backwardToken;
+@property (nonatomic, copy, nullable) NSString *forwardToken;
+@property (nonatomic) BOOL backwardBlocked;
+@property (nonatomic) BOOL forwardBlocked;
+@property (nonatomic) BOOL backwardConnected;
+@property (nonatomic) BOOL forwardConnected;
+/** YES только если упорядоченное перекрытие достигает текущего непрерывного самого нового блока. */
+@property (nonatomic) BOOL attachedToLive;
+@property (nonatomic) NSUInteger revision;
+@end
+
 @protocol MXStore <NSObject>
 
 @property (nonatomic, readonly) id<MXRoomSummaryStore> _Nonnull roomSummaryStore;
@@ -224,6 +266,28 @@ typedef NS_ENUM(NSUInteger, MXRoomBackwardPaginationState)
  @param roomId the id of the room.
  */
 - (BOOL)isRoomMarkedAsUnread:(nonnull NSString*)roomId;
+
+/** Сохраняемые интервалы от старых к новым; изменения фиксируются вместе с сообщениями комнаты.
+ Перечисление только из хранилища намеренно пересекает эти границы. Для расчёта готовности
+ последних сообщений нужно использовать continuousRecentMessages, а не плоский перечислитель. */
+- (NSArray<MXRoomHistoryGap *> * _Nonnull)historyGapsForRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(historyGaps(forRoom:));
+- (NSUInteger)historyRevisionForRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(historyRevision(forRoom:));
+- (NSArray<MXEvent *> * _Nonnull)continuousRecentMessagesForRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(continuousRecentMessages(forRoom:));
+- (void)storeHistoryGap:(MXRoomHistoryGap * _Nonnull)gap forRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(storeHistoryGap(_:forRoom:));
+- (void)removeHistoryGapWithId:(NSString * _Nonnull)gapId inRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(removeHistoryGap(withId:inRoom:));
+/** События идут от старых к новым. Опорная точка nil означает вставку у самого старого края. */
+- (void)insertHistoryEvents:(NSArray<MXEvent *> * _Nonnull)events inRoom:(NSString * _Nonnull)roomId beforeEventId:(NSString * _Nullable)eventId NS_SWIFT_NAME(insertHistoryEvents(_:inRoom:beforeEventId:));
+/** Только непосредственно соседний более старый блок служит доказательством соединения. */
+- (NSArray<MXEvent *> * _Nonnull)historyBlockBeforeGap:(MXRoomHistoryGap * _Nonnull)gap inRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(historyBlock(before:inRoom:));
+/** Атомарное применение страницы. Входные события идут от новых к старым; старый курсор комнаты не меняется. */
+- (void)applyHistoryGap:(MXRoomHistoryGap * _Nonnull)gap inRoom:(NSString * _Nonnull)roomId events:(NSArray<MXEvent *> * _Nonnull)events nextToken:(NSString * _Nullable)token NS_SWIFT_NAME(applyHistoryGap(_:inRoom:events:nextToken:));
+
+/** Чтение контекста может загрузить существующую комнату перед началом запроса. Изменения
+ сверяют зафиксированное неповторяющееся поколение и ревизии, не создавая комнату. */
+- (NSArray<MXRoomHistoryContext *> * _Nonnull)historyContextsForRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(historyContexts(forRoom:));
+- (MXRoomHistoryContext * _Nullable)historyContextForEventId:(NSString * _Nonnull)eventId inRoom:(NSString * _Nonnull)roomId filter:(NSDictionary * _Nonnull)filter NS_SWIFT_NAME(historyContext(forEventId:inRoom:filter:));
+- (NSString * _Nullable)historyContextGenerationForRoom:(NSString * _Nonnull)roomId NS_SWIFT_NAME(historyContextGeneration(forRoom:));
+- (BOOL)storeHistoryContext:(MXRoomHistoryContext * _Nonnull)context inRoom:(NSString * _Nonnull)roomId expectedGeneration:(NSString * _Nonnull)generation expectedRoomRevision:(NSUInteger)roomRevision expectedComponentRevision:(NSUInteger)componentRevision NS_SWIFT_NAME(storeHistoryContext(_:inRoom:expectedGeneration:expectedRoomRevision:expectedComponentRevision:));
 
 #pragma mark - Matrix users
 /**

@@ -556,4 +556,36 @@
     return nil;
 }
 
+- (NSArray<MXRoomHistoryGap *> *)historyGapsForRoom:(NSString *)roomId
+{
+    return @[];
+}
+- (NSUInteger)historyRevisionForRoom:(NSString *)roomId
+{
+    return 0;
+}
+- (NSArray<MXEvent *> *)continuousRecentMessagesForRoom:(NSString *)roomId
+{
+    return @[];
+}
+- (void)storeHistoryGap:(MXRoomHistoryGap *)gap forRoom:(NSString *)roomId
+{
+}
+- (void)removeHistoryGapWithId:(NSString *)gapId inRoom:(NSString *)roomId
+{
+}
+- (void)insertHistoryEvents:(NSArray<MXEvent *> *)events inRoom:(NSString *)roomId beforeEventId:(NSString *)eventId
+{
+}
+- (NSArray<MXEvent *> *)historyBlockBeforeGap:(MXRoomHistoryGap *)gap inRoom:(NSString *)roomId
+{
+    return @[];
+}
+- (void)applyHistoryGap:(MXRoomHistoryGap *)gap inRoom:(NSString *)roomId events:(NSArray<MXEvent *> *)events nextToken:(NSString *)token
+{
+}
+- (NSArray<MXRoomHistoryContext *> *)historyContextsForRoom:(NSString *)roomId { return @[]; }
+- (MXRoomHistoryContext *)historyContextForEventId:(NSString *)eventId inRoom:(NSString *)roomId filter:(NSDictionary *)filter { return nil; }
+- (NSString *)historyContextGenerationForRoom:(NSString *)roomId { return nil; }
+- (BOOL)storeHistoryContext:(MXRoomHistoryContext *)context inRoom:(NSString *)roomId expectedGeneration:(NSString *)generation expectedRoomRevision:(NSUInteger)roomRevision expectedComponentRevision:(NSUInteger)componentRevision { return NO; }
 @end

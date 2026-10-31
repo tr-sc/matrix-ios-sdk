@@ -2741,4 +2741,30 @@ static NSUInteger preloadOptions;
     });
 }
 
+- (void)storeHistoryGap:(MXRoomHistoryGap *)gap forRoom:(NSString *)roomId
+{
+    [super storeHistoryGap:gap forRoom:roomId];
+    if (![roomsToCommitForMessages containsObject:roomId]) [roomsToCommitForMessages addObject:roomId];
+}
+- (void)removeHistoryGapWithId:(NSString *)gapId inRoom:(NSString *)roomId
+{
+    [super removeHistoryGapWithId:gapId inRoom:roomId];
+    if (![roomsToCommitForMessages containsObject:roomId]) [roomsToCommitForMessages addObject:roomId];
+}
+- (void)insertHistoryEvents:(NSArray<MXEvent *> *)events inRoom:(NSString *)roomId beforeEventId:(NSString *)eventId
+{
+    [super insertHistoryEvents:events inRoom:roomId beforeEventId:eventId];
+    if (![roomsToCommitForMessages containsObject:roomId]) [roomsToCommitForMessages addObject:roomId];
+}
+- (void)applyHistoryGap:(MXRoomHistoryGap *)gap inRoom:(NSString *)roomId events:(NSArray<MXEvent *> *)events nextToken:(NSString *)token
+{
+    [super applyHistoryGap:gap inRoom:roomId events:events nextToken:token];
+    if (![roomsToCommitForMessages containsObject:roomId]) [roomsToCommitForMessages addObject:roomId];
+}
+- (BOOL)storeHistoryContext:(MXRoomHistoryContext *)context inRoom:(NSString *)roomId expectedGeneration:(NSString *)generation expectedRoomRevision:(NSUInteger)roomRevision expectedComponentRevision:(NSUInteger)componentRevision
+{
+    BOOL saved = [super storeHistoryContext:context inRoom:roomId expectedGeneration:generation expectedRoomRevision:roomRevision expectedComponentRevision:componentRevision];
+    if (saved && ![roomsToCommitForMessages containsObject:roomId]) [roomsToCommitForMessages addObject:roomId];
+    return saved;
+}
 @end

@@ -18,6 +18,7 @@
  */
 
 #import "MXRestClient.h"
+#import "MXHTTPOperation_Private.h"
 
 #import "MXSDKOptions.h"
 #import "MXJSONModel.h"
@@ -2968,26 +2969,55 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     }
 
     MXWeakify(self);
-    return [httpClient requestWithMethod:@"GET"
+    __block MXHTTPOperation *operation;
+    __block dispatch_block_t pendingDelivery;
+    NSObject *bindingLock = [NSObject new];
+    // Ошибки предварительной проверки могут прийти синхронно до возврата дескриптора
+    // из requestWithMethod. Не ставим работу SDK в очередь, пока дескриптор не сможет владеть своей арендой обработки.
+    void (^deliverWhenBound)(dispatch_block_t) = ^(dispatch_block_t delivery) {
+        @synchronized (bindingLock)
+        {
+            if (!operation) { pendingDelivery = [delivery copy]; return; }
+        }
+        delivery();
+    };
+    MXHTTPOperation *request = [httpClient requestWithMethod:@"GET"
                                     path:path
                               parameters:parameters
                                  success:^(NSDictionary *JSONResponse) {
-                                     MXStrongifyAndReturnIfNil(self);
+                                     deliverWhenBound(^{
+                                         MXStrongifyAndReturnIfNil(self);
 
-                                     if (success)
-                                     {
-                                         __block MXPaginationResponse *paginatedResponse;
-                                         [self dispatchProcessing:^{
-                                             MXJSONModelSetMXJSONModel(paginatedResponse, MXPaginationResponse, JSONResponse);
-                                         } andCompletion:^{
-                                             success(paginatedResponse);
-                                         }];
-                                     }
+                                         if (success)
+                                         {
+                                             __block MXPaginationResponse *paginatedResponse;
+                                             [self dispatchHistoryProcessing:^{
+                                                 MXJSONModelSetMXJSONModel(paginatedResponse, MXPaginationResponse, JSONResponse);
+                                             } andCompletion:^{
+                                                 if (operation.isCancelled)
+                                                 {
+                                                     if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
+                                                 }
+                                                 else success(paginatedResponse);
+                                             } operation:operation];
+                                         }
+                                     });
                                  }
                                  failure:^(NSError *error) {
-                                     MXStrongifyAndReturnIfNil(self);
-                                     [self dispatchFailure:error inBlock:failure];
+                                     deliverWhenBound(^{
+                                         MXStrongifyAndReturnIfNil(self);
+                                         [self dispatchHistoryProcessing:nil andCompletion:^{ if (failure) failure(error); } operation:operation];
+                                     });
                                  }];
+    dispatch_block_t delivery;
+    @synchronized (bindingLock)
+    {
+        operation = request;
+        delivery = pendingDelivery;
+        pendingDelivery = nil;
+    }
+    if (delivery) delivery();
+    return operation;
 }
 
 - (MXHTTPOperation*)membersOfRoom:(NSString*)roomId
@@ -3372,26 +3402,55 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     }
 
     MXWeakify(self);
-    return [httpClient requestWithMethod:@"GET"
+    __block MXHTTPOperation *operation;
+    __block dispatch_block_t pendingDelivery;
+    NSObject *bindingLock = [NSObject new];
+    // Ошибки предварительной проверки могут прийти синхронно до возврата дескриптора
+    // из requestWithMethod. Не ставим работу SDK в очередь, пока дескриптор не сможет владеть своей арендой обработки.
+    void (^deliverWhenBound)(dispatch_block_t) = ^(dispatch_block_t delivery) {
+        @synchronized (bindingLock)
+        {
+            if (!operation) { pendingDelivery = [delivery copy]; return; }
+        }
+        delivery();
+    };
+    MXHTTPOperation *request = [httpClient requestWithMethod:@"GET"
                                     path:path
                               parameters:parameters
                                  success:^(NSDictionary *JSONResponse) {
-                                     MXStrongifyAndReturnIfNil(self);
+                                     deliverWhenBound(^{
+                                         MXStrongifyAndReturnIfNil(self);
 
-                                     if (success)
-                                     {
-                                         __block MXEventContext *eventContext;
-                                         [self dispatchProcessing:^{
-                                             MXJSONModelSetMXJSONModel(eventContext, MXEventContext, JSONResponse);
-                                         } andCompletion:^{
-                                             success(eventContext);
-                                         }];
-                                     }
+                                         if (success)
+                                         {
+                                             __block MXEventContext *eventContext;
+                                             [self dispatchHistoryProcessing:^{
+                                                 MXJSONModelSetMXJSONModel(eventContext, MXEventContext, JSONResponse);
+                                             } andCompletion:^{
+                                                 if (operation.isCancelled)
+                                                 {
+                                                     if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
+                                                 }
+                                                 else success(eventContext);
+                                             } operation:operation];
+                                         }
+                                     });
                                  }
                                  failure:^(NSError *error) {
-                                     MXStrongifyAndReturnIfNil(self);
-                                     [self dispatchFailure:error inBlock:failure];
+                                     deliverWhenBound(^{
+                                         MXStrongifyAndReturnIfNil(self);
+                                         [self dispatchHistoryProcessing:nil andCompletion:^{ if (failure) failure(error); } operation:operation];
+                                     });
                                  }];
+    dispatch_block_t delivery;
+    @synchronized (bindingLock)
+    {
+        operation = request;
+        delivery = pendingDelivery;
+        pendingDelivery = nil;
+    }
+    if (delivery) delivery();
+    return operation;
 }
 
 - (MXHTTPOperation*)setRoomRelatedGroups:(NSString *)roomId
@@ -6260,6 +6319,28 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
  @param processingBlock code block to run on the processing queue.
  @param completionBlock code block to run on the completion queue.
  */
+// Владение обработкой истории сохраняется при преобразовании моделей и доставке. Передачи
+// между двумя очередями должны перекрываться: получаем следующую аренду обработки до освобождения текущей.
+- (void)dispatchHistoryProcessing:(dispatch_block_t)processingBlock andCompletion:(dispatch_block_t)completionBlock operation:(MXHTTPOperation *)operation
+{
+    NSParameterAssert(operation);
+    dispatch_queue_t queue = processingQueue;
+    if (!queue) return;
+    MXWeakify(self);
+    dispatch_async(queue, [operation processingBlock:^{
+        MXStrongifyAndReturnIfNil(self);
+        if (!operation.isCancelled && processingBlock) processingBlock();
+        dispatch_queue_t deliveryQueue = self->completionQueue;
+        if (deliveryQueue)
+        {
+            dispatch_async(deliveryQueue, [operation processingBlock:^{
+                // close может сделать доставку недействительной уже после постановки в очередь.
+                if (self->completionQueue && completionBlock) completionBlock();
+            }]);
+        }
+    }]);
+}
+
 - (void)dispatchProcessing:(dispatch_block_t)processingBlock andCompletion:(dispatch_block_t)completionBlock
 {
     if (processingQueue)

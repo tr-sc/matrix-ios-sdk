@@ -1380,11 +1380,16 @@ NSString *const kMXEventTypeStringCallNotifyUnstable = @"org.matrix.msc4075.call
 
 - (id)copyWithZone:(NSZone *)zone
 {
-    MXEvent *event = [MXEvent modelFromJSON:self.JSONDictionary];
-    
+    // Копия события не должна сохранять изменяемое вложенное содержимое транспорта. Архивные
+    // снимки истории могут пережить последующие обновления удаления содержимого или расшифровки.
+    NSData *data = [NSJSONSerialization dataWithJSONObject:self.JSONDictionary options:0 error:nil];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    MXEvent *event = [MXEvent modelFromJSON:json];
+
     if (self.isEncrypted && self.clearEvent.JSONDictionary)
     {
-        event->_clearEvent = [MXEvent modelFromJSON:self.clearEvent.JSONDictionary];
+        NSData *clearData = [NSJSONSerialization dataWithJSONObject:self.clearEvent.JSONDictionary options:0 error:nil];
+        event->_clearEvent = [MXEvent modelFromJSON:[NSJSONSerialization JSONObjectWithData:clearData options:0 error:nil]];
     }
     
     return event;

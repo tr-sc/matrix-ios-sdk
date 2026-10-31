@@ -77,6 +77,7 @@ static NSError *MXHTTPCancelledError(void)
 // weak in the opposite direction; terminal completion releases user captures.
 @interface MXHTTPRequestContext : NSObject
 @property (nonatomic, strong) MXHTTPOperation *operation;
+@property (nonatomic, strong) MXHTTPProcessingLease *processingLease;
 @property (nonatomic, copy) void (^success)(NSDictionary *);
 @property (nonatomic, copy) void (^failure)(NSError *);
 - (void)finishWithResponse:(NSDictionary *)response error:(NSError *)error failed:(BOOL)failed;
@@ -97,14 +98,25 @@ static NSError *MXHTTPCancelledError(void)
     self.operation = nil;
     self.success = nil;
     self.failure = nil;
-    if (![operation completeHTTPRequest]) return;
-    if (operation.isCancelled) {
-        error = MXHTTPCancelledError();
-        failed = YES;
+    @try
+    {
+        if (![operation completeHTTPRequest]) return;
+        if (operation.isCancelled) {
+            error = MXHTTPCancelledError();
+            failed = YES;
+        }
+        if (failed) {
+            if (failure) failure(error);
+        } else if (success) success(response);
     }
-    if (failed) {
-        if (failure) failure(error);
-    } else if (success) success(response);
+    @finally
+    {
+        // Завершённая задача или провайдер может удерживать объект обратного вызова неограниченно долго.
+        // Нам принадлежит только её активное продолжение; попытки AF и работа SDK в очереди
+        // имеют отдельные аренды обработки, сохраняющиеся после этой логически завершающей доставки.
+        [self.processingLease finish];
+        self.processingLease = nil;
+    }
 }
 @end
 
@@ -291,6 +303,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
     }];
     MXHTTPRequestContext *context = [MXHTTPRequestContext new];
     context.operation = mxHTTPOperation;
+    context.processingLease = [mxHTTPOperation beginProcessing];
     context.success = success;
     context.failure = failure;
     success = ^(NSDictionary *response) {
@@ -444,6 +457,7 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
 
     MXLogDebug(@"[MXHTTPClient] #%@ - %@ %@", @(requestNumber), httpMethod, path);
 
+    MXHTTPProcessingLease *attemptLease = [mxHTTPOperation beginProcessing];
     NSURLSessionDataTask *task = [httpManager dataTaskWithRequest:request uploadProgress:^(NSProgress * _Nonnull theUploadProgress) {
         
         if (uploadProgress)
@@ -483,9 +497,9 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
             if (responseDelayMS)
             {
                 MXLogDebug(@"[MXHTTPClient] Delay call of success for request %p", mxHTTPOperation);
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, responseDelayMS * USEC_PER_SEC), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, responseDelayMS * USEC_PER_SEC), dispatch_get_main_queue(), [mxHTTPOperation processingBlock:^{
                     success(JSONResponse);
-                });
+                }]);
             }
             else
             {
@@ -703,9 +717,9 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
             if (responseDelayMS)
             {
                 MXLogDebug(@"[MXHTTPClient] Delay call of failure for request %p", mxHTTPOperation);
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, responseDelayMS * USEC_PER_SEC), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, responseDelayMS * USEC_PER_SEC), dispatch_get_main_queue(), [mxHTTPOperation processingBlock:^{
                     failure(error);
-                });
+                }]);
             }
             else
             {
@@ -727,6 +741,25 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
             [self cleanupBackgroundTask];
         });
     }];
+
+    if (!task)
+    {
+        [attemptLease finish];
+        failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorUnknown userInfo:nil]);
+        return;
+    }
+    // AF отправляет это уведомление после сериализации ответа И завершающего
+    // обратного вызова. URLSessionTask.state == completed — слишком рано. Устанавливаем наблюдателя до
+    // resume, учитывая гонку отмены ещё приостановленной задачи.
+    __block id drainObserver;
+    drainObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AFNetworkingTaskDidCompleteNotification
+        object:task queue:nil usingBlock:^(NSNotification *notification) {
+            [[NSNotificationCenter defaultCenter] removeObserver:drainObserver];
+            drainObserver = nil;
+            // Выходим из текущего цикла уведомления AF, прежде чем допускать новую обработку истории.
+            // Это граница обработки, а не гарантия пикового RSS.
+            dispatch_async(dispatch_get_main_queue(), ^{ [attemptLease finish]; });
+        }];
 
     // Make request continues when app goes in background
     [self startBackgroundTask];

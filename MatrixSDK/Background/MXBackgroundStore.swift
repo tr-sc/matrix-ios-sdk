@@ -117,6 +117,22 @@ class MXBackgroundStore: NSObject, MXStore {
     }
     
     
+    func historyGaps(forRoom roomId: String) -> [MXRoomHistoryGap] { roomStore(forRoom: roomId)?.historyGaps ?? [] }
+    func historyRevision(forRoom roomId: String) -> UInt { roomStore(forRoom: roomId)?.historyRevision ?? 0 }
+    func continuousRecentMessages(forRoom roomId: String) -> [MXEvent] { roomStore(forRoom: roomId)?.continuousRecentMessages ?? [] }
+    func historyBlock(before gap: MXRoomHistoryGap, inRoom roomId: String) -> [MXEvent] { roomStore(forRoom: roomId)?.historyBlock(beforeGap: gap) ?? [] }
+    func storeHistoryGap(_ gap: MXRoomHistoryGap, forRoom roomId: String) {}
+    func removeHistoryGap(withId gapId: String, inRoom roomId: String) {}
+    func insertHistoryEvents(_ events: [MXEvent], inRoom roomId: String, beforeEventId eventId: String?) {}
+    func applyHistoryGap(_ gap: MXRoomHistoryGap, inRoom roomId: String, events: [MXEvent], nextToken token: String?) {}
+
+    func historyContexts(forRoom roomId: String) -> [MXRoomHistoryContext] { roomStore(forRoom: roomId)?.historyContexts ?? [] }
+    func historyContext(forEventId eventId: String, inRoom roomId: String, filter: [AnyHashable: Any]) -> MXRoomHistoryContext? {
+        roomStore(forRoom: roomId)?.historyContext(forEventId: eventId, filter: filter)
+    }
+    func historyContextGeneration(forRoom roomId: String) -> String? { roomStore(forRoom: roomId)?.historyContextGeneration }
+    func storeHistoryContext(_ context: MXRoomHistoryContext, inRoom roomId: String, expectedGeneration: String, expectedRoomRevision: UInt, expectedComponentRevision: UInt) -> Bool { false }
+
     //  MARK: - Stubs
     
     /// Following operations should be not required

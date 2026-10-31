@@ -68,6 +68,12 @@
 @property (nonatomic, readonly, getter=isCancelled) BOOL canceled;
 
 /**
+ Продолжается ли зарегистрированная работа транспорта, декодирования, обработки SDK или цепочки операций.
+ Отмена и логическое завершение не означают, что эта работа закончилась.
+ */
+@property (nonatomic, readonly) BOOL hasPendingProcessing;
+
+/**
  The HTTP response.
  */
 @property (nonatomic, nullable) NSHTTPURLResponse *httpResponse;

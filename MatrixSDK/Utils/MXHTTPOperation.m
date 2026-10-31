@@ -42,10 +42,26 @@
     dispatch_block_t retryCancellation;
     dispatch_block_t completionHandler;
     BOOL httpComplete;
+    NSUInteger processingCount;
+    NSMutableArray<MXHTTPOperation *> *processingChildren;
 }
 @property (nonatomic, strong) NSError *lastHTTPError;
+- (void)finishProcessing;
 @end
 
+@interface MXHTTPProcessingLease ()
+@property (nonatomic, strong) MXHTTPOperation *owner;
+@end
+
+@implementation MXHTTPProcessingLease
+- (void)finish
+{
+    MXHTTPOperation *owner;
+    @synchronized (self) { owner = _owner; _owner = nil; }
+    [owner finishProcessing];
+}
+- (void)dealloc { [self finish]; }
+@end
 
 @implementation MXHTTPOperation
 
@@ -53,6 +69,43 @@
 @synthesize canceled = _canceled;
 @synthesize maxTotalAttempts = _maxTotalAttempts;
 @synthesize lastHTTPError = _lastHTTPError;
+
+- (MXHTTPProcessingLease *)beginProcessing
+{
+    MXHTTPProcessingLease *lease = [MXHTTPProcessingLease new];
+    @synchronized (self) { processingCount++; }
+    lease.owner = self;
+    return lease;
+}
+
+- (void)finishProcessing
+{
+    @synchronized (self) { NSAssert(processingCount, @"Unbalanced processing lease"); processingCount--; }
+}
+
+- (dispatch_block_t)processingBlock:(dispatch_block_t)block
+{
+    MXHTTPProcessingLease *lease = [self beginProcessing];
+    return ^{ @try { if (block) block(); } @finally { [lease finish]; } };
+}
+
+- (BOOL)hasPendingProcessing
+{
+    NSArray<MXHTTPOperation *> *children;
+    BOOL pending;
+    @synchronized (self) { pending = processingCount != 0; children = [processingChildren copy]; }
+    for (MXHTTPOperation *child in children)
+    {
+        if (child.hasPendingProcessing) pending = YES;
+        else if (child.isHTTPRequestComplete)
+        {
+            // Завершённая дочерняя HTTP-операция не может запланировать новую попытку. Её продолжения
+            // SDK в очереди удерживают аренды обработки до доставки завершения HTTP.
+            @synchronized (self) { [processingChildren removeObjectIdenticalTo:child]; }
+        }
+    }
+    return pending;
+}
 
 - (NSNumber *)maxTotalAttempts { @synchronized (self) { return _maxTotalAttempts; } }
 - (void)setMaxTotalAttempts:(NSNumber *)limit
@@ -75,6 +128,7 @@
         _maxNumberOfTries = MXHTTPOPERATION_DEFAULT_MAX_RETRIES;
         _maxRetriesTime = MXHTTPOPERATION_DEFAULT_MAX_TIME_MS;
         _canceled = NO;
+        processingChildren = [NSMutableArray array];
     }
     return self;
 }
@@ -82,7 +136,7 @@
 - (void)cancel
 {
     NSURLSessionDataTask *task;
-    MXHTTPOperation *child;
+    NSArray<MXHTTPOperation *> *children;
     dispatch_block_t handler;
     @synchronized (self)
     {
@@ -93,14 +147,14 @@
         _httpResponse = nil;
         task = _operation;
         _operation = nil;
-        child = chainedOperation;
+        children = [processingChildren copy];
         chainedOperation = nil;
         handler = cancellationHandler;
         cancellationHandler = nil;
     }
     // No callbacks or traversal of other operations while holding our lock.
     [task cancel];
-    [child cancel];
+    for (MXHTTPOperation *child in children) [child cancel];
     if (handler) handler();
 }
 
@@ -207,18 +261,29 @@
     
     BOOL cancelled;
     // Serialize link changes (not HTTP work) so concurrent A->B / B->A cannot
-    // create a retain cycle. cancel only detaches links and never takes this lock.
+    // создать цикл удержания, в том числе через предыдущие дочерние операции, обработка которых ещё завершается.
     @synchronized (MXHTTPOperation.class)
     {
-        for (MXHTTPOperation *cursor = operation; cursor;)
+        NSMutableArray<MXHTTPOperation *> *pending = [NSMutableArray arrayWithObject:operation];
+        NSHashTable *visited = [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
+        while (pending.count)
         {
+            MXHTTPOperation *cursor = pending.lastObject;
+            [pending removeLastObject];
             if (cursor == self) return;
-            @synchronized (cursor) { cursor = cursor->chainedOperation; }
+            if ([visited containsObject:cursor]) continue;
+            [visited addObject:cursor];
+            @synchronized (cursor)
+            {
+                [pending addObjectsFromArray:cursor->processingChildren];
+                if (cursor->chainedOperation) [pending addObject:cursor->chainedOperation];
+            }
         }
         NSURLSessionDataTask *task = operation.operation;
         @synchronized (self)
         {
             cancelled = _canceled;
+            if (![processingChildren containsObject:operation]) [processingChildren addObject:operation];
             chainedOperation = cancelled ? nil : operation;
             _operation = cancelled ? nil : task;
             creationDate = operation->creationDate;
