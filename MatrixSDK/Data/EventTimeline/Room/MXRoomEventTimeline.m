@@ -1524,8 +1524,18 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         return valid && !finished;
     };
     if (!backState) backState = [[MXRoomState alloc] initBackStateWith:_state];
+    // Восстановление разрыва не наследует ограничения отображения: они могут скрывать удаления
+    // целей вне страницы. Сохраняем настройки состояния и принятую политику исключения реакций.
+    NSMutableDictionary *recoveryFilterData = [NSMutableDictionary dictionary];
+    for (NSString *key in @[@"lazy_load_members", @"include_redundant_members"]) {
+        if (_roomEventFilter.dictionary[key]) recoveryFilterData[key] = _roomEventFilter.dictionary[key];
+    }
+    if ([_roomEventFilter.notTypes containsObject:kMXEventTypeStringReaction]) {
+        recoveryFilterData[@"not_types"] = @[kMXEventTypeStringReaction];
+    }
+    MXRoomEventFilter *recoveryFilter = [[MXRoomEventFilter alloc] initWithDictionary:recoveryFilterData];
     MXHTTPOperation *request = [room.mxSession.matrixRestClient messagesForRoom:room.roomId
-        from:gap.backwardToken direction:MXTimelineDirectionBackwards limit:50 filter:_roomEventFilter
+        from:gap.backwardToken direction:MXTimelineDirectionBackwards limit:50 filter:recoveryFilter
         success:^(MXPaginationResponse *response) {
             if (!shouldApply()) return;
             [self fixRoomIdInEvents:response.chunk];
@@ -1837,9 +1847,28 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     id<MXStore> liveStore = room.mxSession.store;
     MXRoomHistoryContext *existing = [liveStore historyContextForEventId:context.event.eventId inRoom:room.roomId filter:_roomEventFilter.dictionary ?: @{}];
     if (existing) {
+        NSString *generation = [liveStore historyContextGenerationForRoom:room.roomId];
+        NSMutableArray<MXEvent *> *sources = [NSMutableArray arrayWithObject:context.event];
+        [sources addObjectsFromArray:context.eventsBefore ?: @[]];
+        [sources addObjectsFromArray:context.eventsAfter ?: @[]];
+        [sources addObjectsFromArray:context.state ?: @[]];
+        NSPredicate *redacted = [NSPredicate predicateWithBlock:^BOOL(MXEvent *event, NSDictionary *bindings) {
+            return event.eventId.length && event.redactedBecause != nil;
+        }];
+        NSArray<MXEvent *> *redactions = [sources filteredArrayUsingPredicate:redacted];
+        if (redactions.count) {
+            // Повторный контекст не меняет покрытие и корни, но может впервые подтвердить удаление.
+            // Сначала проверяем CAS; события, все проекции и индекс удалений фиксируются затем вместе.
+            NSUInteger revision = [liveStore historyRevisionForRoom:room.roomId];
+            if (![liveStore storeHistoryContext:existing inRoom:room.roomId expectedGeneration:generation
+                          expectedRoomRevision:revision expectedComponentRevision:existing.revision]) return;
+            for (MXEvent *event in redactions) [liveStore replaceEvent:event inRoom:room.roomId];
+            if ([liveStore respondsToSelector:@selector(commit)]) [liveStore commit];
+            [self notifyHistoryGapChange];
+        }
         persistedContextId = existing.componentId;
         persistedContextRootId = existing.selectedRootId;
-        persistedContextGeneration = [liveStore historyContextGenerationForRoom:room.roomId];
+        persistedContextGeneration = generation;
         return;
     }
     MXRoomHistoryContext *component = [MXRoomHistoryContext new];
