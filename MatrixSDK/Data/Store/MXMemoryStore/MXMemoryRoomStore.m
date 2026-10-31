@@ -168,6 +168,7 @@ static void MXSetContextBoundaryOwners(MXRoomHistoryContext *context);
     {
         messages = [NSMutableArray array];
         _historyGaps = @[];
+        _historyRedactions = @{};
         _historyContexts = @[];
         _historyContextGeneration = NSUUID.UUID.UUIDString;
         _historyRevision = 1;
@@ -190,9 +191,82 @@ static void MXSetContextBoundaryOwners(MXRoomHistoryContext *context);
     return self.backwardPaginationState == MXRoomBackwardPaginationStateExhausted;
 }
 
+// Удаление монотонно: более старый ответ не возвращает содержимое цели.
+- (MXEvent *)eventByApplyingHistoryRedaction:(MXEvent *)event
+{
+    NSDictionary *redaction = event.eventId.length ? self.historyRedactions[event.eventId] : nil;
+    if (!redaction && event.eventId.length) redaction = messagesByEventIds[event.eventId].redactedBecause;
+    redaction = redaction ?: event.redactedBecause;
+    if (!redaction) return event;
+    MXEvent *pruned = [event prune];
+    pruned.redactedBecause = redaction;
+    return pruned;
+}
+
+- (void)rememberHistoryRedactionForEvent:(MXEvent *)event
+{
+    if (!event.eventId.length || !event.redactedBecause || self.historyRedactions[event.eventId]) return;
+    NSMutableDictionary *redactions = [self.historyRedactions mutableCopy];
+    redactions[event.eventId] = event.redactedBecause;
+    self.historyRedactions = redactions;
+    _historyRevision++;
+}
+
+- (NSArray<MXEvent *> *)eventsByApplyingHistoryRedactions:(NSArray<MXEvent *> *)events
+{
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:events.count];
+    for (MXEvent *event in events) [result addObject:[self eventByApplyingHistoryRedaction:event]];
+    return result;
+}
+
+- (void)applyHistoryRedactionsToContext:(MXRoomHistoryContext *)context
+{
+    context.events = [self eventsByApplyingHistoryRedactions:context.events];
+    context.initialEvents = [self eventsByApplyingHistoryRedactions:context.initialEvents];
+    context.initialState = [self eventsByApplyingHistoryRedactions:context.initialState];
+    NSMutableArray *updates = [NSMutableArray array];
+    for (NSDictionary *update in context.pageUpdates) {
+        [updates addObject:@{@"direction": update[@"direction"],
+                             @"events": [self eventsByApplyingHistoryRedactions:update[@"events"]],
+                             @"state": [self eventsByApplyingHistoryRedactions:update[@"state"]]}];
+    }
+    context.pageUpdates = updates;
+    for (MXRoomHistoryContext *root in context.replayRoots) [self applyHistoryRedactionsToContext:root];
+}
+
+- (void)rememberHistoryRedactionsInEvents:(NSArray<MXEvent *> *)events
+{
+    for (MXEvent *event in events) {
+        if (event.eventType == MXEventTypeRoomRedaction && event.redacts.length && !self.historyRedactions[event.redacts]) {
+            NSMutableDictionary *redactions = [self.historyRedactions mutableCopy];
+            redactions[event.redacts] = event.JSONDictionary;
+            self.historyRedactions = redactions;
+            _historyRevision++;
+        }
+        if (event.redactedBecause) [self replaceEvent:event];
+    }
+}
+
+- (void)rememberHistoryRedactionsInContext:(MXRoomHistoryContext *)context
+{
+    [self rememberHistoryRedactionsInEvents:context.events];
+    [self rememberHistoryRedactionsInEvents:context.initialEvents];
+    [self rememberHistoryRedactionsInEvents:context.initialState];
+    for (NSDictionary *update in context.pageUpdates) {
+        [self rememberHistoryRedactionsInEvents:update[@"events"]];
+        [self rememberHistoryRedactionsInEvents:update[@"state"]];
+    }
+    for (MXRoomHistoryContext *root in context.replayRoots) [self rememberHistoryRedactionsInContext:root];
+}
+
 - (void)storeEvent:(MXEvent *)event direction:(MXTimelineDirection)direction
 {
-    if (event.eventId && messagesByEventIds[event.eventId]) return;
+    [self rememberHistoryRedactionForEvent:event];
+    event = [self eventByApplyingHistoryRedaction:event];
+    if (event.eventId && messagesByEventIds[event.eventId]) {
+        if (event.redactedBecause) [self replaceEvent:event];
+        return;
+    }
     _historyRevision++;
     if (MXTimelineDirectionForwards == direction)
     {
@@ -218,6 +292,8 @@ static NSArray *MXReplaceContextEvent(NSArray<MXEvent *> *events, MXEvent *repla
 
 - (void)replaceEvent:(MXEvent*)event
 {
+    [self rememberHistoryRedactionForEvent:event];
+    event = [self eventByApplyingHistoryRedaction:event];
     // Содержимое контекста — альтернативные проекции одного события, а не
     // независимый источник истины. Обновляем каждый источник воспроизведения и упорядоченное покрытие.
     NSMutableArray *projections = [NSMutableArray arrayWithArray:_historyContexts];
@@ -259,6 +335,7 @@ static NSArray *MXReplaceContextEvent(NSArray<MXEvent *> *events, MXEvent *repla
 - (void)removeAllMessages
 {
     _historyGaps = @[];
+    _historyRedactions = @{};
     _historyContexts = @[];
     _historyContextGeneration = NSUUID.UUID.UUIDString;
     _historyRevision++;
@@ -551,7 +628,9 @@ static NSArray<MXEvent *> *MXRetainedContextEvents(NSArray<MXEvent *> *events, u
 {
     NSUInteger index = eventId ? [self indexOfHistoryEvent:eventId] : 0;
     if (index == NSNotFound) return; // Устаревшая или удалённая граница: не добавляем события в предполагаемое место.
-    for (MXEvent *event in events) {
+    [self rememberHistoryRedactionsInEvents:events];
+    for (MXEvent *incoming in events) {
+        MXEvent *event = [self eventByApplyingHistoryRedaction:incoming];
         if (!event.eventId.length || messagesByEventIds[event.eventId]) continue;
         [messages insertObject:event atIndex:index++];
         messagesByEventIds[event.eventId] = event; _historyRevision++;
@@ -755,6 +834,11 @@ static NSArray<MXEvent *> *MXRetainedContextEvents(NSArray<MXEvent *> *events, u
         for (NSUInteger i = lastMissing + 1; i < ids.count; i++) if (![newerIds containsObject:ids[i]]) return;
         BOOL olderProof = firstMissing > 0, newerProof = lastMissing + 1 < ids.count;
         if (!olderProof && !newerProof) return;
+        // Позиционное перекрытие не доказывает покрытие исключённых типов/отправителей.
+        // Сохраняем полный разрыв и его курсор; после независимого восстановления блок присоединится.
+        for (NSString *key in context.filter) {
+            if (![key isEqualToString:@"lazy_load_members"] && ![key isEqualToString:@"include_redundant_members"]) return;
+        }
         [self insertHistoryEvents:missing beforeEventId:gap.newerAnchorEventId];
         [self removeHistoryGapWithId:gap.gapId];
         if (!olderProof) {
@@ -813,7 +897,7 @@ static NSArray<MXEvent *> *MXUnionContextEvents(NSArray<MXEvent *> *left, NSArra
         NSInteger r = i - offset;
         MXEvent *b = r >= 0 && r < right.count ? right[r] : nil;
         if (a && b && ![a.eventId isEqualToString:b.eventId]) return nil;
-        MXEvent *event = a ?: b;
+        MXEvent *event = b.redactedBecause ? b : (a ?: b);
         if (!event || [seen containsObject:event.eventId]) return nil;
         [seen addObject:event.eventId]; [result addObject:event];
     }
@@ -900,6 +984,14 @@ static void MXSetContextBoundaryOwners(MXRoomHistoryContext *context)
         } while (merged);
         [self trimHistoryContext:saved before:self.historyContextRetentionTimestamp];
         if (!saved.events.count) return NO;
+        // Старые архивы ещё не содержат индекс удалений: учитываем сохранённые проекции до замены.
+        for (MXRoomHistoryContext *other in _historyContexts) [self rememberHistoryRedactionsInContext:other];
+        [self rememberHistoryRedactionsInContext:saved];
+        [self applyHistoryRedactionsToContext:saved];
+        for (MXRoomHistoryContext *other in contexts) [self applyHistoryRedactionsToContext:other];
+        for (MXEvent *event in [messages copy]) {
+            if (self.historyRedactions[event.eventId]) [self replaceEvent:[self eventByApplyingHistoryRedaction:event]];
+        }
         MXSetContextBoundaryOwners(saved);
         [self reconcileHistoryContext:saved];
         [contexts addObject:saved];

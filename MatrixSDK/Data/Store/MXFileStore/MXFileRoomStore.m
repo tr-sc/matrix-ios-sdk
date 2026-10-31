@@ -64,6 +64,7 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
 
         self.partialAttributedTextMessage = [aDecoder decodeObjectForKey:@"partialAttributedTextMessage"];
 
+        self.historyRedactions = [aDecoder decodeObjectForKey:@"historyRedactionsV1"] ?: @{};
         self.historyGaps = [aDecoder decodeObjectForKey:@"historyGapsV1"] ?: @[];
         self.historyContexts = [aDecoder decodeObjectForKey:@"historyContextsV1"] ?: @[];
         self.historyContextGeneration = [aDecoder decodeObjectForKey:@"historyContextGenerationV1"] ?: self.historyContextGeneration;
@@ -90,6 +91,7 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
     snapshot.backwardPaginationState = self.backwardPaginationState;
     snapshot.hasLoadedAllRoomMembersForRoom = self.hasLoadedAllRoomMembersForRoom;
     snapshot.partialAttributedTextMessage = self.partialAttributedTextMessage;
+    snapshot.historyRedactions = self.historyRedactions;
     snapshot.historyGaps = self.historyGaps;
     snapshot.historyContexts = self.historyContexts;
     snapshot.historyContextGeneration = self.historyContextGeneration;
@@ -112,6 +114,7 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
         [aCoder encodeObject:self.paginationToken forKey:@"paginationToken"];
     }
     
+    [aCoder encodeObject:self.historyRedactions forKey:@"historyRedactionsV1"];
     [aCoder encodeObject:self.historyGaps forKey:@"historyGapsV1"];
     [aCoder encodeObject:self.historyContexts forKey:@"historyContextsV1"];
     [aCoder encodeObject:self.historyContextGeneration forKey:@"historyContextGenerationV1"];

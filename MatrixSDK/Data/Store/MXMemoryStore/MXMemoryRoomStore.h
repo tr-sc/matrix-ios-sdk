@@ -32,6 +32,9 @@
     NSMutableDictionary<NSString*, MXEvent*> *messagesByEventIds;
 }
 
+// Подтверждённые удаления, включая ещё не загруженные цели; очищаются вместе с комнатой.
+@property (nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *historyRedactions;
+
 /**
  Store room event received from the home server.
 
