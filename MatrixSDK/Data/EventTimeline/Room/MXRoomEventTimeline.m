@@ -357,13 +357,13 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
             return;
         }
-        // And fill the timelime with received data
-        [self initialiseState:eventContext.state];
-
-        // Reset pagination state from here
-        [self->paginationOperations removeObject:contextOperation];
-        [self resetPagination];
-        [self->paginationOperations addObject:contextOperation];
+        // Классический путь сохраняет порядок; durable-контекст сначала получает версии из live-хранилища.
+        if (!durableContext) {
+            [self initialiseState:eventContext.state];
+            [self->paginationOperations removeObject:contextOperation];
+            [self resetPagination];
+            [self->paginationOperations addObject:contextOperation];
+        }
 
         NSMutableArray *events = [NSMutableArray array];
         [events addObject:eventContext.event];
@@ -379,16 +379,31 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                 if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
                 return;
             }
-            self->_historyContext = eventContext;
             [self persistProvenContext:eventContext];
             if (durableContext) {
                 MXRoomHistoryContext *saved = self.historyContextComponent;
-                if (!saved) { if (failure) failure([NSError errorWithDomain:@"MXRoomHistoryContext" code:3 userInfo:nil]); return; }
-                NSSet *retainedIds = [NSSet setWithArray:[saved.events valueForKey:@"eventId"]];
-                NSPredicate *retained = [NSPredicate predicateWithBlock:^BOOL(MXEvent *event, NSDictionary *bindings) { return [retainedIds containsObject:event.eventId]; }];
-                eventContext.eventsBefore = [eventContext.eventsBefore filteredArrayUsingPredicate:retained];
-                eventContext.eventsAfter = [eventContext.eventsAfter filteredArrayUsingPredicate:retained];
+                MXRoomHistoryContext *root;
+                for (MXRoomHistoryContext *candidate in saved.replayRoots) {
+                    if ([candidate.componentId isEqualToString:self->persistedContextRootId]) { root = candidate; break; }
+                }
+                NSMutableDictionary<NSString *, MXEvent *> *retained = [NSMutableDictionary dictionary];
+                for (MXEvent *event in saved.events) retained[event.eventId] = event;
+                MXEvent *target = retained[eventContext.event.eventId];
+                if (!root || !target) { if (failure) failure([NSError errorWithDomain:@"MXRoomHistoryContext" code:3 userInfo:nil]); return; }
+                // Совпадения ID недостаточно: в приватный timeline передаём очищенные объекты и состояние корня.
+                NSMutableArray *before = [NSMutableArray array], *after = [NSMutableArray array];
+                for (MXEvent *event in eventContext.eventsBefore) if (retained[event.eventId]) [before addObject:retained[event.eventId]];
+                for (MXEvent *event in eventContext.eventsAfter) if (retained[event.eventId]) [after addObject:retained[event.eventId]];
+                eventContext.event = target;
+                eventContext.eventsBefore = before;
+                eventContext.eventsAfter = after;
+                eventContext.state = root.initialState;
+                [self initialiseState:eventContext.state];
+                [self->paginationOperations removeObject:contextOperation];
+                [self resetPagination];
+                [self->paginationOperations addObject:contextOperation];
             }
+            self->_historyContext = eventContext;
             [self addEvent:eventContext.event direction:MXTimelineDirectionForwards fromStore:NO isRoomInitialSync:NO];
             
             for (MXEvent *event in eventContext.eventsBefore)
@@ -1090,7 +1105,15 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     // Make sure we have not processed this event yet
     if (fromStore == NO && [store eventExistsWithEventId:event.eventId inRoom:room.roomId])
     {
+        if (event.redactedBecause && [self preservesContextHistory]) [store replaceEvent:event inRoom:room.roomId];
         return;
+    }
+
+    // Применяем сохранённое удаление до обработки состояния и уведомления подписчиков.
+    BOOL storedForHistory = !fromStore && [self preservesContextHistory];
+    if (storedForHistory) [store storeEventForRoom:_state.roomId event:event direction:direction];
+    if ([self preservesContextHistory] && event.eventId.length) {
+        event = [store eventWithEventId:event.eventId inRoom:_state.roomId] ?: event;
     }
 
     // State event updates the timeline room state
@@ -1118,7 +1141,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     }
 
     // Store the event
-    if (!fromStore)
+    if (!fromStore && !storedForHistory)
     {
         [store storeEventForRoom:_state.roomId event:event direction:direction];
     }
@@ -1138,6 +1161,11 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
 #pragma mark - Specific events Handling
 - (void)handleRedaction:(MXEvent*)redactionEvent
+{
+    [self handleRedaction:redactionEvent lookupUnknownTarget:YES];
+}
+
+- (void)handleRedaction:(MXEvent*)redactionEvent lookupUnknownTarget:(BOOL)lookupUnknownTarget
 {
     MXLogDebug(@"[MXRoomEventTimeline] handleRedaction: handle an event redaction");
     
@@ -1212,7 +1240,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         // TODO
         MXLogDebug(@"[MXRoomEventTimeline] handleRedaction: the redacted event is a former state event. TODO: prune prev_content of the current state event");
     }
-    else if (!redactedEvent)
+    else if (!redactedEvent && lookupUnknownTarget)
     {
         MXLogDebug(@"[MXRoomEventTimeline] handleRedaction: the redacted event is unknown. Fetch it from the homeserver");
 
@@ -1519,8 +1547,13 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                 // Применяем редактирование с удалением содержимого и обработку агрегации/веток через тот же
                 // путь обработки событий, но никогда не добавляем страницу интервала к самому старому краю истории.
                 for (MXEvent *event in delivered) {
-                    if (event.eventType == MXEventTypeRoomRedaction) [self handleRedaction:event];
+                    if (event.eventType == MXEventTypeRoomRedaction) [self handleRedaction:event lookupUnknownTarget:NO];
                     [self addEvent:event direction:MXTimelineDirectionBackwards fromStore:YES isRoomInitialSync:NO];
+                }
+                // Возвращаем те же монотонные версии, которые получают подписчики timeline.
+                for (NSUInteger index = 0; index < delivered.count; index++) {
+                    MXEvent *current = [self->store eventWithEventId:delivered[index].eventId inRoom:self->room.roomId];
+                    if (current) delivered[index] = current;
                 }
                 if ([self->store respondsToSelector:@selector(commit)]) [self->store commit];
                 MXRoomHistoryGap *remaining;
@@ -1537,7 +1570,11 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                 }
             }]];
         } failure:^(NSError *error) {
-            if (error.code != NSURLErrorCancelled && shouldApply()) {
+            BOOL offline = [error.domain isEqualToString:NSURLErrorDomain]
+                && (error.code == NSURLErrorNotConnectedToInternet || error.code == NSURLErrorNetworkConnectionLost);
+            BOOL cancelled = [error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled;
+            // Офлайн сохраняет курсор без постоянной блокировки; старые blocked-записи не мигрируем.
+            if (!offline && !cancelled && shouldApply()) {
                 MXRoomHistoryGap *blocked = [requestedGap copy]; blocked.recoveryBlocked = YES;
                 [self->store storeHistoryGap:blocked forRoom:self->room.roomId];
                 if ([self->store respondsToSelector:@selector(commit)]) [self->store commit];
@@ -1709,6 +1746,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             if ((previousOverlap != NSNotFound && index != previousOverlap + 1)
                 || (direction == MXTimelineDirectionForwards && encounteredNew)) return NO;
             previousOverlap = index; encounteredOverlap = YES;
+            // Перекрытие не добавляет строку, но несёт новое доказательство удаления.
+            // Оно попадёт в CAS-коммит через покрытие корня и монотонное объединение хранилища.
+            if (event.redactedBecause) events[index] = event;
         } else {
             if (direction == MXTimelineDirectionBackwards && encounteredOverlap) return NO;
             [newEvents addObject:event]; encounteredNew = YES;
@@ -1735,13 +1775,20 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     canonical.pageUpdates = component.pageUpdates; canonical.targetEventId = component.targetEventId;
     if (![liveStore storeHistoryContext:canonical inRoom:room.roomId expectedGeneration:persistedContextGeneration expectedRoomRevision:expectedRoomRevision expectedComponentRevision:canonical.revision]) return NO;
     MXRoomHistoryContext *committed = [liveStore historyContextForEventId:component.targetEventId inRoom:room.roomId filter:component.filter];
+    MXRoomHistoryContext *committedRoot;
+    for (MXRoomHistoryContext *root in committed.replayRoots) {
+        if ([root.componentId isEqualToString:persistedContextRootId]) { committedRoot = root; break; }
+    }
+    if (!committedRoot || !committedRoot.pageUpdates.count) return NO;
     persistedContextId = committed.componentId;
-    // Ограничение хранения может удалить содержимое, сохранив продвигающийся курсор. Никогда
-    // не передаём это удалённое содержимое позже из исходного HTTP-ответа.
-    NSSet *retainedIds = [NSSet setWithArray:[committed.events valueForKey:@"eventId"]];
+    // Сохраняем порядок ответа, но доставляем только сохранённые очищенные версии.
+    // Состояние берём из той же страницы того же корня, а не из другого объединённого контекста.
+    NSMutableDictionary<NSString *, MXEvent *> *retained = [NSMutableDictionary dictionary];
+    for (MXEvent *event in committed.events) retained[event.eventId] = event;
     NSMutableArray *retainedChunk = [NSMutableArray array];
-    for (MXEvent *event in response.chunk) if ([retainedIds containsObject:event.eventId]) [retainedChunk addObject:event];
+    for (MXEvent *event in response.chunk) if (retained[event.eventId]) [retainedChunk addObject:retained[event.eventId]];
     response.chunk = retainedChunk;
+    response.state = committedRoot.pageUpdates.lastObject[@"state"];
     if ([liveStore respondsToSelector:@selector(commit)]) [liveStore commit];
     [self notifyHistoryGapChange];
     return YES;
