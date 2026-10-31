@@ -682,6 +682,9 @@ static NSArray<MXEvent *> *MXRetainedContextEvents(NSArray<MXEvent *> *events, u
         [self storeHistoryGap:blocked];
         return;
     }
+    // Только проверенный префикс действующего разрыва может обновить содержимое.
+    // Совпавшие ID не добавляются повторно, но подтверждённые удаления нельзя терять при дедупликации.
+    [self rememberHistoryRedactionsInEvents:events];
     NSString *anchor = gap.newerAnchorEventId;
     BOOL reachedTargetOlder = NO;
     NSMutableDictionary<NSString *, MXRoomHistoryGap *> *advanced = [NSMutableDictionary dictionary];
