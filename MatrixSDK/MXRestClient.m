@@ -2968,6 +2968,32 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
         parameters[@"filter"] = roomEventFilter.jsonString;
     }
 
+    if (!MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
+    {
+        // Flag off: the stock request, cancel semantics and queues, without processing leases.
+        MXWeakify(self);
+        return [httpClient requestWithMethod:@"GET"
+                                        path:path
+                                  parameters:parameters
+                                     success:^(NSDictionary *JSONResponse) {
+                                         MXStrongifyAndReturnIfNil(self);
+
+                                         if (success)
+                                         {
+                                             __block MXPaginationResponse *paginatedResponse;
+                                             [self dispatchProcessing:^{
+                                                 MXJSONModelSetMXJSONModel(paginatedResponse, MXPaginationResponse, JSONResponse);
+                                             } andCompletion:^{
+                                                 success(paginatedResponse);
+                                             }];
+                                         }
+                                     }
+                                     failure:^(NSError *error) {
+                                         MXStrongifyAndReturnIfNil(self);
+                                         [self dispatchFailure:error inBlock:failure];
+                                     }];
+    }
+
     MXWeakify(self);
     __block MXHTTPOperation *operation;
     __block dispatch_block_t pendingDelivery;
@@ -3399,6 +3425,32 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     if (filter)
     {
         parameters[@"filter"] = filter.jsonString;
+    }
+
+    if (!MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
+    {
+        // Flag off: the stock request, cancel semantics and queues, without processing leases.
+        MXWeakify(self);
+        return [httpClient requestWithMethod:@"GET"
+                                        path:path
+                                  parameters:parameters
+                                     success:^(NSDictionary *JSONResponse) {
+                                         MXStrongifyAndReturnIfNil(self);
+
+                                         if (success)
+                                         {
+                                             __block MXEventContext *eventContext;
+                                             [self dispatchProcessing:^{
+                                                 MXJSONModelSetMXJSONModel(eventContext, MXEventContext, JSONResponse);
+                                             } andCompletion:^{
+                                                 success(eventContext);
+                                             }];
+                                         }
+                                     }
+                                     failure:^(NSError *error) {
+                                         MXStrongifyAndReturnIfNil(self);
+                                         [self dispatchFailure:error inBlock:failure];
+                                     }];
     }
 
     MXWeakify(self);

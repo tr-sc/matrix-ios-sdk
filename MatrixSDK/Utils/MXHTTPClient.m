@@ -742,24 +742,29 @@ andOnUnrecognizedCertificateBlock:(MXHTTPClientOnUnrecognizedCertificate)onUnrec
         });
     }];
 
-    if (!task)
+    // attemptLease is nil while preserveHistoryOnSlidingSyncGaps is off: no drain observer and
+    // no extra nil-task failure, the request runs as before the history feature.
+    if (attemptLease)
     {
-        [attemptLease finish];
-        failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorUnknown userInfo:nil]);
-        return;
+        if (!task)
+        {
+            [attemptLease finish];
+            failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorUnknown userInfo:nil]);
+            return;
+        }
+        // AF отправляет это уведомление после сериализации ответа И завершающего
+        // обратного вызова. URLSessionTask.state == completed — слишком рано. Устанавливаем наблюдателя до
+        // resume, учитывая гонку отмены ещё приостановленной задачи.
+        __block id drainObserver;
+        drainObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AFNetworkingTaskDidCompleteNotification
+            object:task queue:nil usingBlock:^(NSNotification *notification) {
+                [[NSNotificationCenter defaultCenter] removeObserver:drainObserver];
+                drainObserver = nil;
+                // Выходим из текущего цикла уведомления AF, прежде чем допускать новую обработку истории.
+                // Это граница обработки, а не гарантия пикового RSS.
+                dispatch_async(dispatch_get_main_queue(), ^{ [attemptLease finish]; });
+            }];
     }
-    // AF отправляет это уведомление после сериализации ответа И завершающего
-    // обратного вызова. URLSessionTask.state == completed — слишком рано. Устанавливаем наблюдателя до
-    // resume, учитывая гонку отмены ещё приостановленной задачи.
-    __block id drainObserver;
-    drainObserver = [[NSNotificationCenter defaultCenter] addObserverForName:AFNetworkingTaskDidCompleteNotification
-        object:task queue:nil usingBlock:^(NSNotification *notification) {
-            [[NSNotificationCenter defaultCenter] removeObserver:drainObserver];
-            drainObserver = nil;
-            // Выходим из текущего цикла уведомления AF, прежде чем допускать новую обработку истории.
-            // Это граница обработки, а не гарантия пикового RSS.
-            dispatch_async(dispatch_get_main_queue(), ^{ [attemptLease finish]; });
-        }];
 
     // Make request continues when app goes in background
     [self startBackgroundTask];

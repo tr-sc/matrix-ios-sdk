@@ -17,6 +17,8 @@
 
 #import "MXFileRoomStore.h"
 
+#import "MXSDKOptions.h"
+
 static NSString *const kMXFileRoomStoreBackwardPaginationStateV1Key = @"backwardPaginationStateV1";
 static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHomeServerPaginationEnd";
 
@@ -28,7 +30,15 @@ static NSString *const kMXFileRoomStoreLegacyPaginationEndKey = @"hasReachedHome
     self = [self init];
     if (self)
     {
-        messages = [[aDecoder decodeObjectForKey:@"messages"] mutableCopy] ?: [NSMutableArray array];
+        if (MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
+        {
+            messages = [[aDecoder decodeObjectForKey:@"messages"] mutableCopy] ?: [NSMutableArray array];
+        }
+        else
+        {
+            // Flag off: decode exactly as before the history feature.
+            messages = [aDecoder decodeObjectForKey:@"messages"];
+        }
 
         self.paginationToken = [aDecoder decodeObjectForKey:@"paginationToken"];
 

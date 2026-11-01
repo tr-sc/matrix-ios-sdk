@@ -320,6 +320,56 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     NSParameterAssert(success);
     NSAssert(_initialEventId, @"[MXRoomEventTimeline] resetPaginationAroundInitialEventWithLimit cannot be called on live timeline");
     
+    if (!MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
+    {
+        // Flag off: the stock context load (no wrapper operation, no history context bookkeeping).
+        // Reset the store
+        if (!store.isPermanent)
+        {
+            [store deleteAllData];
+        }
+
+        forwardsPaginationToken = nil;
+        hasReachedHomeServerForwardsPaginationEnd = NO;
+
+        // Get the context around the initial event
+        MXWeakify(self);
+        return [room.mxSession.matrixRestClient contextOfEvent:_initialEventId inRoom:room.roomId limit:limit filter:_roomEventFilter success:^(MXEventContext *eventContext) {
+            MXStrongifyAndReturnIfNil(self);
+
+            // And fill the timelime with received data
+            [self initialiseState:eventContext.state];
+
+            // Reset pagination state from here
+            [self resetPagination];
+
+            NSMutableArray *events = [NSMutableArray array];
+            [events addObject:eventContext.event];
+            [events addObjectsFromArray:eventContext.eventsBefore];
+            [events addObjectsFromArray:eventContext.eventsAfter];
+
+            [self decryptEvents:events onComplete:^{
+                [self addEvent:eventContext.event direction:MXTimelineDirectionForwards fromStore:NO isRoomInitialSync:NO];
+
+                for (MXEvent *event in eventContext.eventsBefore)
+                {
+                    [self addEvent:event direction:MXTimelineDirectionBackwards fromStore:NO isRoomInitialSync:NO];
+                }
+
+                for (MXEvent *event in eventContext.eventsAfter)
+                {
+                    [self addEvent:event direction:MXTimelineDirectionForwards fromStore:NO isRoomInitialSync:NO];
+                }
+
+                [self->store storePaginationTokenOfRoom:self->room.roomId andToken:eventContext.start];
+                self->forwardsPaginationToken = eventContext.end;
+
+                success();
+            }];
+
+        } failure:failure];
+    }
+
     if ([self restoreHistoryContextFromStore]) {
         MXHTTPOperation *restored = [MXHTTPOperation new];
         dispatch_async(dispatch_get_main_queue(), [restored processingBlock:^{ if (!restored.isCancelled) success(); }]);
@@ -1313,10 +1363,12 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         [_state handleStateEvents:stateEvents];
 
         // Update summary with this state events update
-        if (!_initialEventId) [room.summary handleStateEvents:stateEvents];
+        // Only the history feature keeps non-live (context) timelines from touching the summary.
+        BOOL updatesRoom = !_initialEventId || !MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps;
+        if (updatesRoom) [room.summary handleStateEvents:stateEvents];
 
         // Update room account data with this state events update
-        if (!_initialEventId) [room.mxSession.roomAccountDataUpdateDelegate updateAccountDataForRoom:room
+        if (updatesRoom) [room.mxSession.roomAccountDataUpdateDelegate updateAccountDataForRoom:room
                                                                withStateEvents:stateEvents];
 
         if (!room.mxSession.syncWithLazyLoadOfRoomMembers && ![store hasLoadedAllRoomMembersForRoom:room.roomId])

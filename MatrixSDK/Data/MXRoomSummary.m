@@ -391,7 +391,9 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
         operation = [[MXHTTPOperation alloc] init];
     }
     
-    if (operation.isCancelled)
+    // Early cancel delivery is part of the history feature; flag off keeps the stock flow.
+    BOOL reportsCancel = MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps;
+    if (reportsCancel && operation.isCancelled)
     {
         if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
         return operation;
@@ -403,7 +405,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
         [room liveTimeline:^(id<MXEventTimeline> liveTimeline) {
             @try
             {
-                if (operation.isCancelled)
+                if (reportsCancel && operation.isCancelled)
                 {
                     if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
                     return;

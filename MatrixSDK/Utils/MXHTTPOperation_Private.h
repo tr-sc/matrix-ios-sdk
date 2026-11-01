@@ -11,6 +11,7 @@
 @end
 
 @interface MXHTTPOperation (HTTPClient)
+// nil (and processingBlock: returns the block unwrapped) while preserveHistoryOnSlidingSyncGaps is off.
 - (MXHTTPProcessingLease *)beginProcessing;
 - (dispatch_block_t)processingBlock:(dispatch_block_t)block;
 - (void)setHTTPCancellationHandler:(dispatch_block_t)handler;

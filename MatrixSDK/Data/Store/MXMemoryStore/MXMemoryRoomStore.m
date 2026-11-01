@@ -19,11 +19,17 @@
 
 #import "MXEventsEnumeratorOnArray.h"
 #import "MXEventsByTypesEnumeratorOnArray.h"
+#import "MXSDKOptions.h"
 
 @interface MXMemoryRoomStore () <MXEventsEnumeratorDataSource>
 {
 }
 
+@end
+
+// Implemented in MXEvent.m: deep copy used only for history context snapshots.
+@interface MXEvent (MXHistorySnapshot)
+- (MXEvent *)historySnapshotCopy;
 @end
 
 @implementation MXRoomHistoryGap
@@ -64,7 +70,7 @@
 static NSArray<MXEvent *> *MXCopyContextEvents(NSArray<MXEvent *> *events)
 {
     NSMutableArray *copies = [NSMutableArray arrayWithCapacity:events.count];
-    for (MXEvent *event in events) [copies addObject:[event copy]];
+    for (MXEvent *event in events) [copies addObject:[event historySnapshotCopy]];
     return copies;
 }
 
@@ -261,11 +267,15 @@ static void MXSetContextBoundaryOwners(MXRoomHistoryContext *context);
 
 - (void)storeEvent:(MXEvent *)event direction:(MXTimelineDirection)direction
 {
-    [self rememberHistoryRedactionForEvent:event];
-    event = [self eventByApplyingHistoryRedaction:event];
-    if (event.eventId && messagesByEventIds[event.eventId]) {
-        if (event.redactedBecause) [self replaceEvent:event];
-        return;
+    // Redaction index and de-duplication belong to the history feature; flag off keeps the stock store.
+    if (MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
+    {
+        [self rememberHistoryRedactionForEvent:event];
+        event = [self eventByApplyingHistoryRedaction:event];
+        if (event.eventId && messagesByEventIds[event.eventId]) {
+            if (event.redactedBecause) [self replaceEvent:event];
+            return;
+        }
     }
     _historyRevision++;
     if (MXTimelineDirectionForwards == direction)
@@ -286,14 +296,17 @@ static void MXSetContextBoundaryOwners(MXRoomHistoryContext *context);
 static NSArray *MXReplaceContextEvent(NSArray<MXEvent *> *events, MXEvent *replacement)
 {
     NSMutableArray *result = [NSMutableArray arrayWithCapacity:events.count];
-    for (MXEvent *event in events) [result addObject:[event.eventId isEqualToString:replacement.eventId] ? [replacement copy] : event];
+    for (MXEvent *event in events) [result addObject:[event.eventId isEqualToString:replacement.eventId] ? [replacement historySnapshotCopy] : event];
     return result;
 }
 
 - (void)replaceEvent:(MXEvent*)event
 {
-    [self rememberHistoryRedactionForEvent:event];
-    event = [self eventByApplyingHistoryRedaction:event];
+    if (MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
+    {
+        [self rememberHistoryRedactionForEvent:event];
+        event = [self eventByApplyingHistoryRedaction:event];
+    }
     // Содержимое контекста — альтернативные проекции одного события, а не
     // независимый источник истины. Обновляем каждый источник воспроизведения и упорядоченное покрытие.
     NSMutableArray *projections = [NSMutableArray arrayWithArray:_historyContexts];
@@ -488,6 +501,33 @@ static NSArray<MXEvent *> *MXRetainedContextEvents(NSArray<MXEvent *> *events, u
 
 - (BOOL)removeAllMessagesSentBefore:(uint64_t)limitTs
 {
+    // Flag off and no history state left from a flag-on run: the stock retention loop.
+    if (!MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps && !_historyGaps.count && !_historyContexts.count)
+    {
+        NSUInteger index = 0;
+        BOOL didChange = NO;
+        while (index < messages.count)
+        {
+            MXEvent *anEvent = [messages objectAtIndex:index];
+            if (anEvent.isState)
+            {
+                // Keep state event
+                index ++;
+            }
+            else if (anEvent.originServerTs < limitTs)
+            {
+                [messages removeObjectAtIndex:index];
+                [messagesByEventIds removeObjectForKey:anEvent.eventId];
+                didChange = YES;
+            }
+            else
+            {
+                // Break the loop, we've reached the first non-state event in the timeline which is not expired
+                break;
+            }
+        }
+        return didChange;
+    }
     // Сохраняем исходный блок каждой границы до удаления ID событий при ограничении хранения.
     // Перенос границы внутри того же блока не утверждает непрерывности через разрыв.
     NSMutableDictionary<NSString *, NSArray<MXEvent *> *> *olderBlocks = [NSMutableDictionary dictionary];

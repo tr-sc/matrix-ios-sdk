@@ -1380,18 +1380,37 @@ NSString *const kMXEventTypeStringCallNotifyUnstable = @"org.matrix.msc4075.call
 
 - (id)copyWithZone:(NSZone *)zone
 {
-    // Копия события не должна сохранять изменяемое вложенное содержимое транспорта. Архивные
-    // снимки истории могут пережить последующие обновления удаления содержимого или расшифровки.
-    NSData *data = [NSJSONSerialization dataWithJSONObject:self.JSONDictionary options:0 error:nil];
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    MXEvent *event = [MXEvent modelFromJSON:self.JSONDictionary];
+    
+    if (self.isEncrypted && self.clearEvent.JSONDictionary)
+    {
+        event->_clearEvent = [MXEvent modelFromJSON:self.clearEvent.JSONDictionary];
+    }
+    
+    return event;
+}
+
+// Deep copy for durable history snapshots only (MXRoomHistoryContext): they must not share nested
+// JSON containers with live events. Plain -copy stays cheap; non-JSON values fall back to it.
+static NSDictionary *MXHistorySnapshotJSON(NSDictionary *json)
+{
+    if (!json || ![NSJSONSerialization isValidJSONObject:json]) return nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:json options:0 error:nil];
+    return data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+}
+
+- (MXEvent *)historySnapshotCopy
+{
+    NSDictionary *json = MXHistorySnapshotJSON(self.JSONDictionary);
+    if (!json) return [self copy];
     MXEvent *event = [MXEvent modelFromJSON:json];
 
     if (self.isEncrypted && self.clearEvent.JSONDictionary)
     {
-        NSData *clearData = [NSJSONSerialization dataWithJSONObject:self.clearEvent.JSONDictionary options:0 error:nil];
-        event->_clearEvent = [MXEvent modelFromJSON:[NSJSONSerialization JSONObjectWithData:clearData options:0 error:nil]];
+        NSDictionary *clearJSON = MXHistorySnapshotJSON(self.clearEvent.JSONDictionary) ?: self.clearEvent.JSONDictionary;
+        event->_clearEvent = [MXEvent modelFromJSON:clearJSON];
     }
-    
+
     return event;
 }
 

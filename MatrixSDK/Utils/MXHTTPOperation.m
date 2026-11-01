@@ -20,6 +20,7 @@
 
 #import <AFNetworking/AFNetworking.h>
 #import "MXError.h"
+#import "MXSDKOptions.h"
 
 #pragma mark - Constants definitions
 
@@ -70,8 +71,11 @@
 @synthesize maxTotalAttempts = _maxTotalAttempts;
 @synthesize lastHTTPError = _lastHTTPError;
 
+// Processing tracking exists for the history feature only. Flag off: no lease (nil), the wrapped
+// block is returned as is and hasPendingProcessing stays NO, as before the feature.
 - (MXHTTPProcessingLease *)beginProcessing
 {
+    if (!MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps) return nil;
     MXHTTPProcessingLease *lease = [MXHTTPProcessingLease new];
     @synchronized (self) { processingCount++; }
     lease.owner = self;
@@ -86,6 +90,7 @@
 - (dispatch_block_t)processingBlock:(dispatch_block_t)block
 {
     MXHTTPProcessingLease *lease = [self beginProcessing];
+    if (!lease) return block ?: ^{};
     return ^{ @try { if (block) block(); } @finally { [lease finish]; } };
 }
 
@@ -147,7 +152,10 @@
         _httpResponse = nil;
         task = _operation;
         _operation = nil;
-        children = [processingChildren copy];
+        // Flag off: cancel only the current chained operation, as before the history feature.
+        children = MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
+            ? [processingChildren copy]
+            : (chainedOperation ? @[chainedOperation] : @[]);
         chainedOperation = nil;
         handler = cancellationHandler;
         cancellationHandler = nil;
@@ -283,7 +291,8 @@
         @synchronized (self)
         {
             cancelled = _canceled;
-            if (![processingChildren containsObject:operation]) [processingChildren addObject:operation];
+            if (MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
+                && ![processingChildren containsObject:operation]) [processingChildren addObject:operation];
             chainedOperation = cancelled ? nil : operation;
             _operation = cancelled ? nil : task;
             creationDate = operation->creationDate;
