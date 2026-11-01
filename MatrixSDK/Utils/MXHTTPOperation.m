@@ -141,8 +141,12 @@
 - (void)cancel
 {
     NSURLSessionDataTask *task;
+    MXHTTPOperation *child;
     NSArray<MXHTTPOperation *> *children;
     dispatch_block_t handler;
+    // Read once: flag off must not build (autoreleased) child collections that would keep
+    // operations alive past the caller's last reference, as 50302583 never did.
+    BOOL tracksChildren = MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps;
     @synchronized (self)
     {
         if (_canceled) return;
@@ -152,17 +156,16 @@
         _httpResponse = nil;
         task = _operation;
         _operation = nil;
-        // Flag off: cancel only the current chained operation, as before the history feature.
-        children = MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
-            ? [processingChildren copy]
-            : (chainedOperation ? @[chainedOperation] : @[]);
+        if (tracksChildren) children = [processingChildren copy];
+        else child = chainedOperation;
         chainedOperation = nil;
         handler = cancellationHandler;
         cancellationHandler = nil;
     }
     // No callbacks or traversal of other operations while holding our lock.
     [task cancel];
-    for (MXHTTPOperation *child in children) [child cancel];
+    if (tracksChildren) { for (MXHTTPOperation *processingChild in children) [processingChild cancel]; }
+    else [child cancel];
     if (handler) handler();
 }
 
@@ -268,10 +271,23 @@
     }
     
     BOOL cancelled;
+    BOOL tracksChildren = MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps;
     // Serialize link changes (not HTTP work) so concurrent A->B / B->A cannot
-    // создать цикл удержания, в том числе через предыдущие дочерние операции, обработка которых ещё завершается.
+    // create a retain cycle. cancel only detaches links and never takes this lock.
     @synchronized (MXHTTPOperation.class)
     {
+        if (!tracksChildren)
+        {
+            // Flag off: the stock chain walk (no autoreleased collections holding operations).
+            for (MXHTTPOperation *cursor = operation; cursor;)
+            {
+                if (cursor == self) return;
+                @synchronized (cursor) { cursor = cursor->chainedOperation; }
+            }
+        }
+        // Flag on: also walk previous children whose processing is still finishing.
+        else
+        {
         NSMutableArray<MXHTTPOperation *> *pending = [NSMutableArray arrayWithObject:operation];
         NSHashTable *visited = [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality];
         while (pending.count)
@@ -287,12 +303,12 @@
                 if (cursor->chainedOperation) [pending addObject:cursor->chainedOperation];
             }
         }
+        }
         NSURLSessionDataTask *task = operation.operation;
         @synchronized (self)
         {
             cancelled = _canceled;
-            if (MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
-                && ![processingChildren containsObject:operation]) [processingChildren addObject:operation];
+            if (tracksChildren && ![processingChildren containsObject:operation]) [processingChildren addObject:operation];
             chainedOperation = cancelled ? nil : operation;
             _operation = cancelled ? nil : task;
             creationDate = operation->creationDate;
