@@ -101,8 +101,6 @@ static NSUInteger preloadOptions;
     // It is filled on the separate thread so that the UI thread will not be blocked
     // when it will read rooms states.
     NSMutableDictionary<NSString*, NSArray*> *preloadedRoomsStates;
-    // Set on `dispatchQueue` while `preloadRoomsStates` runs: the only time `stateOfRoom:` caches (TRSC).
-    BOOL preloadingRoomsStates;
 
     // Persistent cache for room account data. NSNull represents a room whose
     // account data file was missing or could not be decoded. Access is guarded
@@ -753,14 +751,10 @@ static NSUInteger preloadOptions;
         {
             MXLogWarning(@"[MXFileStore] stateOfRoom: no state was loaded for room %@", roomId);
         }
-
-        if (preloadingRoomsStates)
-        {
-            // Only `preloadRoomsStates` fills the cache. The async `stateOfRoom:success:failure:` also runs
-            // on `dispatchQueue`, and caching its result kept the decoded state array of every loaded room
-            // until the room was read again, and handed that later reader a stale state (TRSC).
-            preloadedRoomsStates[roomId] = stateEvents;
-        }
+        // No caching here: only `preloadRoomsStates` fills the cache, with this result. The async
+        // `stateOfRoom:success:failure:` also runs on `dispatchQueue`, and caching its result kept the
+        // decoded state array of every loaded room until the room was read again, and handed that
+        // later reader a stale state (TRSC).
     }
     else
     {
@@ -1759,12 +1753,10 @@ static NSUInteger preloadOptions;
     
     NSDate *startDate = [NSDate date];
 
-    preloadingRoomsStates = YES;
     for (NSString *roomId in roomIDs)
     {
         preloadedRoomsStates[roomId] = [self stateOfRoom:roomId];
     }
-    preloadingRoomsStates = NO;
 
     MXLogDebug(@"[MXFileStore] Loaded room states of %tu rooms in %.0fms", roomIDs.count, [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
 }
