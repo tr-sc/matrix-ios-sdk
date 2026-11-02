@@ -370,9 +370,16 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         } failure:failure];
     }
 
+    [self cancelPendingPaginations];
     if ([self restoreHistoryContextFromStore]) {
         MXHTTPOperation *restored = [MXHTTPOperation new];
-        dispatch_async(dispatch_get_main_queue(), [restored processingBlock:^{ if (!restored.isCancelled) success(); }]);
+        [paginationOperations addObject:restored];
+        MXWeakify(self);
+        dispatch_async(dispatch_get_main_queue(), [restored processingBlock:^{
+            MXStrongifyAndReturnIfNil(self);
+            [self->paginationOperations removeObject:restored];
+            if (!restored.isCancelled) success();
+        }]);
         return restored;
     }
     persistedContextId = nil; persistedContextGeneration = nil;
@@ -380,8 +387,23 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     id<MXStore> contextStore = contextSession.store;
     [contextStore historyContextsForRoom:room.roomId];
     NSString *contextGeneration = [contextStore historyContextGenerationForRoom:room.roomId];
-    NSUInteger contextRevision = [contextStore historyRevisionForRoom:room.roomId];
+    NSString *contextTarget = [_initialEventId copy];
+    NSDictionary *contextFilter = [_roomEventFilter.dictionary copy] ?: @{};
+    MXRoomHistoryContext *contextComponent = [contextStore historyContextForEventId:contextTarget inRoom:room.roomId filter:contextFilter];
     BOOL durableContext = [self preservesContextHistory] && contextGeneration.length;
+
+    // A live append changes the room revision, not this request's validity. The
+    // store still checks the current room/component revisions at commit time.
+    BOOL (^contextIsCurrent)(MXRoomEventTimeline *) = ^BOOL(MXRoomEventTimeline *timeline) {
+        if (!contextSession || timeline->room.mxSession != contextSession || contextSession.store != contextStore
+            || ![contextSession hasRoomWithRoomId:timeline->room.roomId]
+            || ![contextGeneration isEqualToString:[contextStore historyContextGenerationForRoom:timeline->room.roomId]]
+            || ![contextTarget isEqualToString:timeline->_initialEventId]
+            || ![contextFilter isEqualToDictionary:timeline->_roomEventFilter.dictionary ?: @{}]) return NO;
+        if (!contextComponent) return YES;
+        MXRoomHistoryContext *current = [contextStore historyContextForEventId:contextTarget inRoom:timeline->room.roomId filter:contextFilter];
+        return [current.componentId isEqualToString:contextComponent.componentId] && current.revision == contextComponent.revision;
+    };
 
     // Reset the store
     if (!store.isPermanent)
@@ -400,10 +422,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         MXStrongifyAndReturnIfNil(self);
 
         if (contextOperation.isCancelled) return;
-        if (durableContext && (!contextSession || self->room.mxSession != contextSession || contextSession.store != contextStore
-            || ![contextSession hasRoomWithRoomId:self->room.roomId]
-            || ![contextGeneration isEqualToString:[contextStore historyContextGenerationForRoom:self->room.roomId]]
-            || contextRevision != [contextStore historyRevisionForRoom:self->room.roomId])) {
+        if (durableContext && !contextIsCurrent(self)) {
             if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
             return;
         }
@@ -422,10 +441,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
         [self decryptEvents:events onComplete:[contextOperation processingBlock:^{
             if (contextOperation.isCancelled || !self->room.mxSession) return;
-            if (durableContext && (!contextSession || self->room.mxSession != contextSession || contextSession.store != contextStore
-                || ![contextSession hasRoomWithRoomId:self->room.roomId]
-                || ![contextGeneration isEqualToString:[contextStore historyContextGenerationForRoom:self->room.roomId]]
-                || contextRevision != [contextStore historyRevisionForRoom:self->room.roomId])) {
+            if (durableContext && !contextIsCurrent(self)) {
                 if (failure) failure([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]);
                 return;
             }
