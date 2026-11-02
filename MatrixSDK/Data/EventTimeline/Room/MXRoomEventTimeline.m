@@ -392,8 +392,8 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     MXRoomHistoryContext *contextComponent = [contextStore historyContextForEventId:contextTarget inRoom:room.roomId filter:contextFilter];
     BOOL durableContext = [self preservesContextHistory] && contextGeneration.length;
 
-    // A live append changes the room revision, not this request's validity. The
-    // store still checks the current room/component revisions at commit time.
+    // Новое сообщение меняет ревизию комнаты, но не делает запрос устаревшим.
+    // При сохранении хранилище по-прежнему проверяет актуальные ревизии комнаты и компонента.
     BOOL (^contextIsCurrent)(MXRoomEventTimeline *) = ^BOOL(MXRoomEventTimeline *timeline) {
         if (!contextSession || timeline->room.mxSession != contextSession || contextSession.store != contextStore
             || ![contextSession hasRoomWithRoomId:timeline->room.roomId]
