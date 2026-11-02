@@ -110,6 +110,14 @@ FOUNDATION_EXPORT NSInteger const kMXRoomInvalidInviteSenderErrorCode;
 - (void)state:(void (^)(MXRoomState *roomState))onComplete;
 
 /**
+ TRSC: the live state when the live timeline is already in memory, nil otherwise.
+
+ Unlike `state:`, it never loads the timeline: loading reads the room's whole state
+ file from the store and the room keeps it for the rest of the session.
+ */
+@property (nonatomic, readonly, nullable) MXRoomState *trscLoadedState;
+
+/**
  The current list of members of the room.
 
  It may require a request to the homeserver if the client has not fetched yet all

@@ -212,6 +212,11 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
     }
 }
 
+- (MXRoomState *)trscLoadedState
+{
+    return (needToLoadLiveTimeline || pendingLiveTimelineRequesters) ? nil : liveTimeline.state;
+}
+
 - (void)state:(void (^)(MXRoomState *))onComplete
 {
     [self liveTimeline:^(id<MXEventTimeline> theLiveTimeline) {
