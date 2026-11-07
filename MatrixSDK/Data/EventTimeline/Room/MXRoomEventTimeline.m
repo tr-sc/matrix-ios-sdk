@@ -99,6 +99,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 - (void)notifyHistoryGapChange;
 - (void)persistProvenContext:(MXEventContext *)context;
 - (BOOL)preservesContextHistory;
+- (BOOL)contextIsCurrentForSession:(MXSession *)session store:(id<MXStore>)contextStore generation:(NSString *)generation target:(NSString *)target filter:(NSDictionary *)filter componentId:(NSString *)componentId revision:(NSUInteger)revision;
 - (BOOL)restoreHistoryContextRoot:(NSString *)rootId;
 - (BOOL)persistContextPage:(MXPaginationResponse *)response direction:(MXTimelineDirection)direction;
 - (void)applyContextPageState:(NSArray<MXEvent *> *)events direction:(MXTimelineDirection)direction;
@@ -392,17 +393,10 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     MXRoomHistoryContext *contextComponent = [contextStore historyContextForEventId:contextTarget inRoom:room.roomId filter:contextFilter];
     BOOL durableContext = [self preservesContextHistory] && contextGeneration.length;
 
-    // Новое сообщение меняет ревизию комнаты, но не делает запрос устаревшим.
-    // При сохранении хранилище по-прежнему проверяет актуальные ревизии комнаты и компонента.
     BOOL (^contextIsCurrent)(MXRoomEventTimeline *) = ^BOOL(MXRoomEventTimeline *timeline) {
-        if (!contextSession || timeline->room.mxSession != contextSession || contextSession.store != contextStore
-            || ![contextSession hasRoomWithRoomId:timeline->room.roomId]
-            || ![contextGeneration isEqualToString:[contextStore historyContextGenerationForRoom:timeline->room.roomId]]
-            || ![contextTarget isEqualToString:timeline->_initialEventId]
-            || ![contextFilter isEqualToDictionary:timeline->_roomEventFilter.dictionary ?: @{}]) return NO;
-        if (!contextComponent) return YES;
-        MXRoomHistoryContext *current = [contextStore historyContextForEventId:contextTarget inRoom:timeline->room.roomId filter:contextFilter];
-        return [current.componentId isEqualToString:contextComponent.componentId] && current.revision == contextComponent.revision;
+        return [timeline contextIsCurrentForSession:contextSession store:contextStore generation:contextGeneration
+                                            target:contextTarget filter:contextFilter
+                                       componentId:contextComponent.componentId revision:contextComponent.revision];
     };
 
     // Reset the store
@@ -606,7 +600,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     id<MXStore> requestedContextStore = requestedContextSession.store;
     MXRoomHistoryContext *requestedComponent = self.historyContextComponent;
     NSString *requestedContextGeneration = persistedContextGeneration;
-    __block NSUInteger contextRoomRevision = requestedComponent ? [requestedContextStore historyRevisionForRoom:room.roomId] : 0;
+    NSString *requestedContextTarget = [_initialEventId copy];
+    NSDictionary *requestedContextFilter = [_roomEventFilter.dictionary copy] ?: @{};
+    __block NSString *contextComponentId = requestedComponent.componentId;
     __block NSUInteger contextComponentRevision = requestedComponent.revision;
     void (^finish)(NSError *) = ^(NSError *error) {
         if (finished) return;
@@ -622,11 +618,10 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     };
     BOOL (^shouldApply)(void) = ^BOOL {
         if (finished) return NO;
-        if (requestedComponent && (!requestedContextSession || self->room.mxSession != requestedContextSession
-            || requestedContextSession.store != requestedContextStore || ![requestedContextSession hasRoomWithRoomId:self->room.roomId]
-            || ![requestedContextGeneration isEqualToString:[requestedContextStore historyContextGenerationForRoom:self->room.roomId]]
-            || contextRoomRevision != [requestedContextStore historyRevisionForRoom:self->room.roomId]
-            || contextComponentRevision != self.historyContextComponent.revision)) {
+        if (requestedComponent && ![self contextIsCurrentForSession:requestedContextSession store:requestedContextStore
+                                                        generation:requestedContextGeneration target:requestedContextTarget
+                                                            filter:requestedContextFilter componentId:contextComponentId
+                                                          revision:contextComponentRevision]) {
             finish([NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil]); return NO;
         }
         if (operation.isCancelled || (ordinaryHistoryRequest && [self preservesHistoryGaps] && [self->store historyGapsForRoom:self.state.roomId].count))
@@ -756,8 +751,11 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                 {
                     [self handlePaginationResponse:paginatedResponse direction:direction operation:operation shouldApply:shouldApply didPersistContext:^{
                         if (requestedComponent) {
-                            contextRoomRevision = [requestedContextStore historyRevisionForRoom:self->room.roomId];
-                            contextComponentRevision = self.historyContextComponent.revision;
+                            MXRoomHistoryContext *saved = self.historyContextComponent;
+                            if (saved) {
+                                contextComponentId = saved.componentId;
+                                contextComponentRevision = saved.revision;
+                            }
                         }
                     } failure:finish onComplete:^{
                         MXLogDebug(@"[MXRoomEventTimeline] paginate: is done");
@@ -1673,6 +1671,21 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     NSNumber *sliding = [MXHistoryModes objectForKey:liveStore][room.roomId];
     return liveStore && MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
         && (!sliding || sliding.boolValue);
+}
+
+- (BOOL)contextIsCurrentForSession:(MXSession *)session store:(id<MXStore>)contextStore generation:(NSString *)generation target:(NSString *)target filter:(NSDictionary *)filter componentId:(NSString *)componentId revision:(NSUInteger)revision
+{
+    // Live traffic changes the room revision without invalidating this context.
+    // Persistence still checks a fresh room revision when committing the page.
+    if (!session || room.mxSession != session || session.store != contextStore
+        || ![session hasRoomWithRoomId:room.roomId]
+        || ![generation isEqualToString:[contextStore historyContextGenerationForRoom:room.roomId]]
+        || ![target isEqualToString:_initialEventId]
+        || ![filter isEqualToDictionary:_roomEventFilter.dictionary ?: @{}]) return NO;
+    if (!componentId) return YES;
+    if (persistedContextId && ![persistedContextId isEqualToString:componentId]) return NO;
+    MXRoomHistoryContext *current = [contextStore historyContextForEventId:target inRoom:room.roomId filter:filter];
+    return [current.componentId isEqualToString:componentId] && current.revision == revision;
 }
 
 - (MXRoomHistoryContext *)historyContextComponent
