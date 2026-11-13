@@ -7,12 +7,19 @@
 #import "MXRoomSyncSummary.h"
 #import "MXCredentials.h"
 
+// Bumped whenever `requiredState` in `+[MXSlidingSyncConfiguration defaultConfiguration]` grows:
+// a client that resumes from a persisted position is only sent state it already asked for, so a
+// newly required type would reach fresh installs alone. A new version drops the position and makes
+// every client fetch the window once more, with the current list.
+static NSUInteger const MXSlidingSyncRequiredStateVersion = 2;
+
 NSString *MXSlidingSyncPersistenceKey(MXCredentials *credentials)
 {
-    NSString *identity = [NSString stringWithFormat:@"%@|%@|%@",
+    NSString *identity = [NSString stringWithFormat:@"%@|%@|%@|%tu",
                           credentials.homeServer ?: @"",
                           credentials.userId ?: @"",
-                          credentials.deviceId ?: @""];
+                          credentials.deviceId ?: @"",
+                          MXSlidingSyncRequiredStateVersion];
     return [@"MXSlidingSync." stringByAppendingString:identity];
 }
 
@@ -80,7 +87,11 @@ NSNotificationName const MXSessionSlidingSyncRoomOrderDidChangeNotification = @"
         @[@"m.room.canonical_alias", @""],
         @[@"m.room.power_levels", @""],
         @[@"m.room.join_rules", @""],
-        @[@"m.room.tombstone", @""]
+        @[@"m.room.tombstone", @""],
+        // "Запретить копирование": without this type the event only reaches the member who sent it
+        // (local echo), every other room member reads the flag as off — the timeline no longer holds
+        // it and `timeline_limit` is taken by plain messages.
+        @[@"im.trsc.room.protected_content.v1", @""]
     ];
     configuration.extensions = @{
         @"e2ee": @{@"enabled": @YES},
