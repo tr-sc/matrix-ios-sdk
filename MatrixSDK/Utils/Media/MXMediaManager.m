@@ -45,7 +45,36 @@ static MXMediaManager *sharedMediaManager = nil;
 
 // store the current cache size
 // avoid listing files because it is useless
+// Both values are read and written only on `MXMediaCacheSizeQueue()`.
 static NSUInteger storageCacheSize = 0;
+static BOOL storageCacheSizeKnown = NO;
+
+static void *const kMXMediaCacheSizeQueueKey = (void *)&kMXMediaCacheSizeQueueKey;
+
+/**
+ Serial queue that owns the cache size counter, the first scan of the cache
+ folder and the eviction of old files. The scan walks every file of the cache
+ (hundreds of MB, thousands of files), so it never runs on the caller's thread:
+ `writeMediaData:toFilePath:` is called on main by `MXMediaLoader`.
+ */
+static dispatch_queue_t MXMediaCacheSizeQueue(void)
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+        queue = dispatch_queue_create("org.matrix.sdk.MXMediaManager.cacheSize", attr);
+        dispatch_queue_set_specific(queue, kMXMediaCacheSizeQueueKey, kMXMediaCacheSizeQueueKey, NULL);
+    });
+    return queue;
+}
+
+@interface MXMediaManager ()
+
++ (NSUInteger)cacheSizeOnQueue;
++ (void)reduceCacheSizeOnQueueToInsert:(NSUInteger)sizeInBytes excludingPath:(NSString *)excludedPath;
+
+@end
 
 @implementation MXMediaManager
 
@@ -87,16 +116,27 @@ static NSMutableDictionary* uploadTableById = nil;
 + (BOOL)writeMediaData:(NSData *)mediaData toFilePath:(NSString*)filePath
 {
     BOOL isCacheFile = [filePath hasPrefix:[MXMediaManager getCachePath]];
-    if (isCacheFile)
-    {
-        [MXMediaManager reduceCacheSizeToInsert:mediaData.length];
-    }
     
     if ([mediaData writeToFile:filePath atomically:YES])
     {
         if (isCacheFile)
         {
-            storageCacheSize += mediaData.length;
+            // Size accounting and eviction leave the caller's thread: the first
+            // call scans the whole cache folder. The new file is kept out of the
+            // eviction and counted after it, as when the eviction ran before the write.
+            NSUInteger insertedSize = mediaData.length;
+            NSString *insertedPath = [filePath copy];
+            dispatch_async(MXMediaCacheSizeQueue(), ^{
+                BOOL wasKnown = storageCacheSizeKnown;
+                NSUInteger currentSize = [MXMediaManager cacheSizeOnQueue];
+                if (!wasKnown)
+                {
+                    // The first scan has already counted the new file.
+                    storageCacheSize = currentSize > insertedSize ? currentSize - insertedSize : 0;
+                }
+                [MXMediaManager reduceCacheSizeOnQueueToInsert:insertedSize excludingPath:insertedPath];
+                storageCacheSize += insertedSize;
+            });
         }
         
         return YES;
@@ -1022,7 +1062,16 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
 
 + (void)reduceCacheSizeToInsert:(NSUInteger)sizeInBytes
 {
-    if (([MXMediaManager cacheSize] + sizeInBytes) > [MXMediaManager maxAllowedCacheSize])
+    // Called on main (app going to background): the scan and the eviction run
+    // on the cache size queue.
+    dispatch_async(MXMediaCacheSizeQueue(), ^{
+        [MXMediaManager reduceCacheSizeOnQueueToInsert:sizeInBytes excludingPath:nil];
+    });
+}
+
++ (void)reduceCacheSizeOnQueueToInsert:(NSUInteger)sizeInBytes excludingPath:(NSString *)excludedPath
+{
+    if (([MXMediaManager cacheSizeOnQueue] + sizeInBytes) > [MXMediaManager maxAllowedCacheSize])
     {
         
         NSString* thumbnailPath = [MXMediaManager cacheFolderPath:kMXMediaManagerAvatarThumbnailFolder];
@@ -1047,7 +1096,7 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
         for(NSString* filepath in filesList)
         {
             // do not release the contact thumbnails : they must be released when the contacts are deleted
-            if (![filepath hasPrefix:thumbnailPath])
+            if (![filepath hasPrefix:thumbnailPath] && ![filepath isEqualToString:excludedPath])
             {
                 NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filepath error:nil];
                 
@@ -1071,16 +1120,31 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
 
 + (NSUInteger)cacheSize
 {
+    if (dispatch_get_specific(kMXMediaCacheSizeQueueKey) == kMXMediaCacheSizeQueueKey)
+    {
+        return [MXMediaManager cacheSizeOnQueue];
+    }
+    
+    __block NSUInteger size = 0;
+    dispatch_sync(MXMediaCacheSizeQueue(), ^{
+        size = [MXMediaManager cacheSizeOnQueue];
+    });
+    return size;
+}
+
+/// Must run on `MXMediaCacheSizeQueue()`: the first call scans the cache folder.
++ (NSUInteger)cacheSizeOnQueue
+{
     if (!mediaCachePath)
     {
         // compute the path
         mediaCachePath = [MXMediaManager getCachePath];
     }
     
-    // assume that 0 means uninitialized
-    if (storageCacheSize == 0)
+    if (!storageCacheSizeKnown)
     {
         storageCacheSize = (NSUInteger)[MXTools folderSize:mediaCachePath];
+        storageCacheSizeKnown = YES;
     }
     
     return storageCacheSize;
@@ -1172,7 +1236,11 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
     mediaCachePath = nil;
     
     // force to recompute the cache size at next cacheSize call
-    storageCacheSize = 0;
+    // (queued after any accounting already in flight for the deleted folder)
+    dispatch_async(MXMediaCacheSizeQueue(), ^{
+        storageCacheSize = 0;
+        storageCacheSizeKnown = NO;
+    });
 }
 
 + (NSString*)getCachePath
