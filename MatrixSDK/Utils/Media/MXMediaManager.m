@@ -19,6 +19,7 @@
 #import "TargetConditionals.h"
 
 #import <Photos/Photos.h>
+#import <os/lock.h>
 
 #import "MXMediaManager.h"
 #import "MXScanManager.h"
@@ -69,10 +70,82 @@ static dispatch_queue_t MXMediaCacheSizeQueue(void)
     return queue;
 }
 
+// Cache files written on the caller's thread whose size the queue has not
+// counted yet. A path enters the set before its file is written and leaves it
+// in its queued accounting block, so the folder scan and the eviction (both on
+// the queue) skip it: each file is counted once and no file is evicted before
+// it is counted.
+static NSCountedSet<NSString *> *mediaCachePendingPaths = nil;
+static os_unfair_lock mediaCachePendingPathsLock = OS_UNFAIR_LOCK_INIT;
+
+static void MXMediaCacheAddPendingPath(NSString *path)
+{
+    os_unfair_lock_lock(&mediaCachePendingPathsLock);
+    if (!mediaCachePendingPaths)
+    {
+        mediaCachePendingPaths = [NSCountedSet new];
+    }
+    [mediaCachePendingPaths addObject:path];
+    os_unfair_lock_unlock(&mediaCachePendingPathsLock);
+}
+
+static void MXMediaCacheRemovePendingPath(NSString *path)
+{
+    os_unfair_lock_lock(&mediaCachePendingPathsLock);
+    [mediaCachePendingPaths removeObject:path];
+    os_unfair_lock_unlock(&mediaCachePendingPathsLock);
+}
+
+static NSSet<NSString *> *MXMediaCachePendingPathsSnapshot(void)
+{
+    os_unfair_lock_lock(&mediaCachePendingPathsLock);
+    NSSet<NSString *> *snapshot = mediaCachePendingPaths.count ? [NSSet setWithSet:mediaCachePendingPaths] : [NSSet set];
+    os_unfair_lock_unlock(&mediaCachePendingPathsLock);
+    return snapshot;
+}
+
+/**
+ Size of the regular files under `folderPath`, as `MXTools folderSize:`, minus
+ the files still pending. The pending set is read after the walk: a pending file
+ the walk saw was added to the set before it was written, and its accounting
+ block cannot have run yet (the walk runs on the same serial queue).
+ */
+static NSUInteger MXMediaCacheFolderSizeExcludingPending(NSString *folderPath)
+{
+    if (!folderPath)
+    {
+        return 0;
+    }
+    
+    NSMutableDictionary<NSString *, NSNumber *> *sizes = [NSMutableDictionary dictionary];
+    NSDirectoryEnumerator<NSString *> *enumerator = [[NSFileManager defaultManager] enumeratorAtPath:folderPath];
+    for (NSString *relativePath in enumerator)
+    {
+        NSDictionary<NSFileAttributeKey, id> *attributes = enumerator.fileAttributes;
+        if ([attributes.fileType isEqualToString:NSFileTypeDirectory])
+        {
+            continue;
+        }
+        NSString *path = [folderPath stringByAppendingPathComponent:relativePath];
+        sizes[path] = @(attributes.fileSize);
+    }
+    
+    NSSet<NSString *> *pending = MXMediaCachePendingPathsSnapshot();
+    unsigned long long total = 0;
+    for (NSString *path in sizes)
+    {
+        if (![pending containsObject:path])
+        {
+            total += sizes[path].unsignedLongLongValue;
+        }
+    }
+    return (NSUInteger)total;
+}
+
 @interface MXMediaManager ()
 
-+ (NSUInteger)cacheSizeOnQueue;
-+ (void)reduceCacheSizeOnQueueToInsert:(NSUInteger)sizeInBytes excludingPath:(NSString *)excludedPath;
++ (NSUInteger)cacheSizeOnQueueInFolder:(NSString *)cacheFolderPath;
++ (void)reduceCacheSizeOnQueueToInsert:(NSUInteger)sizeInBytes inFolder:(NSString *)cacheFolderPath;
 
 @end
 
@@ -115,31 +188,38 @@ static NSMutableDictionary* uploadTableById = nil;
 
 + (BOOL)writeMediaData:(NSData *)mediaData toFilePath:(NSString*)filePath
 {
-    BOOL isCacheFile = [filePath hasPrefix:[MXMediaManager getCachePath]];
+    NSString *cacheFolderPath = [MXMediaManager getCachePath];
+    BOOL isCacheFile = cacheFolderPath && [filePath hasPrefix:cacheFolderPath];
+    NSString *insertedPath = [filePath copy];
+    
+    if (isCacheFile)
+    {
+        // Before the write: the queue never counts or evicts this file before
+        // its own accounting block below.
+        MXMediaCacheAddPendingPath(insertedPath);
+    }
     
     if ([mediaData writeToFile:filePath atomically:YES])
     {
         if (isCacheFile)
         {
             // Size accounting and eviction leave the caller's thread: the first
-            // call scans the whole cache folder. The new file is kept out of the
-            // eviction and counted after it, as when the eviction ran before the write.
+            // call scans the whole cache folder. The new file is counted after the
+            // eviction, as when the eviction ran before the write.
             NSUInteger insertedSize = mediaData.length;
-            NSString *insertedPath = [filePath copy];
             dispatch_async(MXMediaCacheSizeQueue(), ^{
-                BOOL wasKnown = storageCacheSizeKnown;
-                NSUInteger currentSize = [MXMediaManager cacheSizeOnQueue];
-                if (!wasKnown)
-                {
-                    // The first scan has already counted the new file.
-                    storageCacheSize = currentSize > insertedSize ? currentSize - insertedSize : 0;
-                }
-                [MXMediaManager reduceCacheSizeOnQueueToInsert:insertedSize excludingPath:insertedPath];
+                [MXMediaManager reduceCacheSizeOnQueueToInsert:insertedSize inFolder:cacheFolderPath];
                 storageCacheSize += insertedSize;
+                MXMediaCacheRemovePendingPath(insertedPath);
             });
         }
         
         return YES;
+    }
+    
+    if (isCacheFile)
+    {
+        MXMediaCacheRemovePendingPath(insertedPath);
     }
     return NO;
 }
@@ -1064,14 +1144,22 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
 {
     // Called on main (app going to background): the scan and the eviction run
     // on the cache size queue.
+    NSString *cacheFolderPath = [MXMediaManager getCachePath];
     dispatch_async(MXMediaCacheSizeQueue(), ^{
-        [MXMediaManager reduceCacheSizeOnQueueToInsert:sizeInBytes excludingPath:nil];
+        [MXMediaManager reduceCacheSizeOnQueueToInsert:sizeInBytes inFolder:cacheFolderPath];
     });
 }
 
-+ (void)reduceCacheSizeOnQueueToInsert:(NSUInteger)sizeInBytes excludingPath:(NSString *)excludedPath
+/// Must run on `MXMediaCacheSizeQueue()`. `cacheFolderPath` is read on the
+/// caller's thread: the `mediaCachePath` static is not touched on the queue.
++ (void)reduceCacheSizeOnQueueToInsert:(NSUInteger)sizeInBytes inFolder:(NSString *)cacheFolderPath
 {
-    if (([MXMediaManager cacheSizeOnQueue] + sizeInBytes) > [MXMediaManager maxAllowedCacheSize])
+    if (!cacheFolderPath)
+    {
+        return;
+    }
+    
+    if (([MXMediaManager cacheSizeOnQueueInFolder:cacheFolderPath] + sizeInBytes) > [MXMediaManager maxAllowedCacheSize])
     {
         
         NSString* thumbnailPath = [MXMediaManager cacheFolderPath:kMXMediaManagerAvatarThumbnailFolder];
@@ -1090,13 +1178,16 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
             maxSize = [MXMediaManager maxAllowedCacheSize] - sizeInBytes - 50 * 1024 * 1024;
         }
         
-        NSArray* filesList = [MXTools listFiles:mediaCachePath timeSorted:YES largeFilesFirst:YES];
+        NSArray* filesList = [MXTools listFiles:cacheFolderPath timeSorted:YES largeFilesFirst:YES];
+        // read after the listing, as in MXMediaCacheFolderSizeExcludingPending
+        NSSet<NSString *> *pendingPaths = MXMediaCachePendingPathsSnapshot();
         
         // list the files sorted by timestamp
         for(NSString* filepath in filesList)
         {
             // do not release the contact thumbnails : they must be released when the contacts are deleted
-            if (![filepath hasPrefix:thumbnailPath] && ![filepath isEqualToString:excludedPath])
+            // nor the files written but not counted yet
+            if (![filepath hasPrefix:thumbnailPath] && ![pendingPaths containsObject:filepath])
             {
                 NSDictionary *fileAttributes = [[NSFileManager defaultManager] attributesOfItemAtPath:filepath error:nil];
                 
@@ -1122,28 +1213,25 @@ static NSMutableDictionary* fileBaseFromMimeType = nil;
 {
     if (dispatch_get_specific(kMXMediaCacheSizeQueueKey) == kMXMediaCacheSizeQueueKey)
     {
-        return [MXMediaManager cacheSizeOnQueue];
+        // A caller already on the queue never reaches here from the SDK; keep
+        // it safe without touching `mediaCachePath` off its threads.
+        return storageCacheSize;
     }
     
+    NSString *cacheFolderPath = [MXMediaManager getCachePath];
     __block NSUInteger size = 0;
     dispatch_sync(MXMediaCacheSizeQueue(), ^{
-        size = [MXMediaManager cacheSizeOnQueue];
+        size = [MXMediaManager cacheSizeOnQueueInFolder:cacheFolderPath];
     });
     return size;
 }
 
 /// Must run on `MXMediaCacheSizeQueue()`: the first call scans the cache folder.
-+ (NSUInteger)cacheSizeOnQueue
++ (NSUInteger)cacheSizeOnQueueInFolder:(NSString *)cacheFolderPath
 {
-    if (!mediaCachePath)
-    {
-        // compute the path
-        mediaCachePath = [MXMediaManager getCachePath];
-    }
-    
     if (!storageCacheSizeKnown)
     {
-        storageCacheSize = (NSUInteger)[MXTools folderSize:mediaCachePath];
+        storageCacheSize = MXMediaCacheFolderSizeExcludingPending(cacheFolderPath);
         storageCacheSizeKnown = YES;
     }
     
