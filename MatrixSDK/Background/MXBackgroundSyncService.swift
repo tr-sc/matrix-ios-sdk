@@ -243,6 +243,25 @@ public enum MXBackgroundSyncServiceError: Error {
         }
     }
     
+    /// Fetch the content of the user account data event of the given type.
+    ///
+    /// The account data merged from the background syncs (persisted in the sync response cache, so a later
+    /// push whose sync does not carry the event still sees its last value) wins over the MXSession store,
+    /// the same order the push rules are read in.
+    /// - Parameter type: The account data event type.
+    /// - Returns: The event content, or nil when neither store has an event of this type.
+    public func accountDataContent(ofType type: String) -> [String: Any]? {
+        if let cached = syncResponseStoreManager.syncResponseStore.accountData,
+           let content = MXAccountData(accountData: cached)?.accountData(forEventType: type) as? [String: Any] {
+            return content
+        }
+        let stored: [AnyHashable: Any]? = store.userAccountData ?? nil
+        guard let accountData = stored as? [String: Any] else {
+            return nil
+        }
+        return MXAccountData(accountData: accountData)?.accountData(forEventType: type) as? [String: Any]
+    }
+
     public func readMarkerEvent(forRoomId roomId: String, completion: @escaping (MXResponse<MXEvent>) -> Void) {
         roomAccountData(forRoomId: roomId) { [weak self] response in
             guard let self = self else { return }
