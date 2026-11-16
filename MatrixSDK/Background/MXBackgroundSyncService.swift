@@ -278,7 +278,7 @@ public enum MXBackgroundSyncServiceError: Error {
                 finish(fresh, "server")
             }, failure: { error in
                 guard !isFinished else { return }
-                if let mxError = MXError(nsError: error as NSError), mxError.errcode == kMXErrCodeStringNotFound {
+                if let nsError = error as NSError?, let mxError = MXError(nsError: nsError), mxError.errcode == kMXErrCodeStringNotFound {
                     // The server has no event of this type: whatever the cache holds is gone.
                     self.cacheAccountDataContent(nil, ofType: type)
                     finish(nil, "server (none)")
@@ -313,10 +313,10 @@ public enum MXBackgroundSyncServiceError: Error {
             return
         }
         if let content = content {
-            accountData.updateData(withType: type, data: content)
+            accountData.update(withType: type, data: content)
         } else {
             guard accountData.accountData(forEventType: type) != nil else { return }
-            accountData.deleteData(withType: type)
+            accountData.delete(withType: type)
         }
         syncResponseStoreManager.syncResponseStore.accountData = accountData.accountData
     }
