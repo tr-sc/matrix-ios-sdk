@@ -42,6 +42,8 @@ public enum MXBackgroundSyncServiceError: Error {
         /// No key backup lookup starts later than this after `event(withEventId:)` was called: a
         /// notification extension has about 30 s per push and still has to build the notification.
         static let keyBackupLookupBudget: TimeInterval = 14
+        /// The account data request of `accountDataContent(ofType:completion:)`: short, the push still has to be built.
+        static let accountDataRequestTimeout: TimeInterval = 3
     }
     
     private let processingQueue: DispatchQueue
@@ -243,25 +245,82 @@ public enum MXBackgroundSyncServiceError: Error {
         }
     }
     
-    /// Fetch the content of the user account data event of the given type.
+    /// Fetch the content of the user account data event of the given type from the homeserver.
     ///
-    /// The account data merged from the background syncs (persisted in the sync response cache, so a later
-    /// push whose sync does not carry the event still sees its last value) wins over the MXSession store,
-    /// the same order the push rules are read in.
-    /// - Parameter type: The account data event type.
-    /// - Returns: The event content, or nil when neither store has an event of this type.
-    public func accountDataContent(ofType type: String) -> [String: Any]? {
-        if let cached = syncResponseStoreManager.syncResponseStore.accountData,
-           let content = MXAccountData(accountData: cached)?.accountData(forEventType: type) as? [String: Any] {
-            return content
+    /// The main application runs Sliding Sync, so this service never syncs the account data, and the MXSession store
+    /// snapshot it loaded once at init goes stale in a warm extension. One `GET /account_data/{type}` per call, within
+    /// `Constants.accountDataRequestTimeout`, gives the current value. It is kept in the sync response cache, which
+    /// stands in when the request fails or runs out of time. An account without such event gets nil.
+    /// - Parameters:
+    ///   - type: The account data event type.
+    ///   - completion: Called once, in main thread, with the event content, or nil when the server has no event of
+    ///     this type, or the request failed and the cache has none either.
+    public func accountDataContent(ofType type: String, completion: @escaping ([String: Any]?) -> Void) {
+        processingQueue.async {
+            // Every callback below runs on `processingQueue` (the rest client's completion queue), so `isFinished`
+            // needs no lock.
+            var isFinished = false
+            var operation: MXHTTPOperation?
+            let finish: ([String: Any]?, String) -> Void = { content, source in
+                guard !isFinished else { return }
+                isFinished = true
+                MXLog.debug("[MXBackgroundSyncService] accountDataContent: \(type) from \(source), found: \(content != nil)")
+                Queues.dispatchQueue.async {
+                    completion(content)
+                }
+            }
+            
+            let timeout: TimeInterval = Constants.accountDataRequestTimeout
+            operation = self.restClient.accountData(ofType: type, timeout: timeout, success: { content in
+                guard !isFinished else { return }
+                let fresh: [String: Any]? = content as? [String: Any]
+                self.cacheAccountDataContent(fresh, ofType: type)
+                finish(fresh, "server")
+            }, failure: { error in
+                guard !isFinished else { return }
+                if let mxError = MXError(nsError: error as NSError), mxError.errcode == kMXErrCodeStringNotFound {
+                    // The server has no event of this type: whatever the cache holds is gone.
+                    self.cacheAccountDataContent(nil, ofType: type)
+                    finish(nil, "server (none)")
+                    return
+                }
+                finish(self.cachedAccountDataContent(ofType: type), "cache, request failed")
+            })
+            // No retries: the extension has a few seconds for the whole push.
+            operation?.maxNumberOfTries = 1
+            
+            self.processingQueue.asyncAfter(deadline: .now() + timeout) {
+                guard !isFinished else { return }
+                operation?.cancel()
+                finish(self.cachedAccountDataContent(ofType: type), "cache, request timed out")
+            }
         }
-        let stored: [AnyHashable: Any]? = store.userAccountData ?? nil
-        guard let accountData = stored as? [String: Any] else {
+    }
+    
+    /// The content of the user account data event of the given type kept in the sync response cache.
+    private func cachedAccountDataContent(ofType type: String) -> [String: Any]? {
+        guard let cached = syncResponseStoreManager.syncResponseStore.accountData,
+              let accountData = MXAccountData(accountData: cached) else {
             return nil
         }
-        return MXAccountData(accountData: accountData)?.accountData(forEventType: type) as? [String: Any]
+        return accountData.accountData(forEventType: type) as? [String: Any]
     }
-
+    
+    /// Keep the content fetched from the server in the sync response cache, or drop the type when the server has none.
+    private func cacheAccountDataContent(_ content: [String: Any]?, ofType type: String) {
+        let cached: [String: Any] = syncResponseStoreManager.syncResponseStore.accountData ?? [:]
+        guard let accountData = MXAccountData(accountData: cached) else {
+            return
+        }
+        if let content = content {
+            accountData.updateData(withType: type, data: content)
+        } else {
+            guard accountData.accountData(forEventType: type) != nil else { return }
+            accountData.deleteData(withType: type)
+        }
+        syncResponseStoreManager.syncResponseStore.accountData = accountData.accountData
+    }
+    
     public func readMarkerEvent(forRoomId roomId: String, completion: @escaping (MXResponse<MXEvent>) -> Void) {
         roomAccountData(forRoomId: roomId) { [weak self] response in
             guard let self = self else { return }

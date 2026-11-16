@@ -651,6 +651,22 @@ NS_REFINED_FOR_SWIFT;
                            failure:(void (^)(NSError *error))failure NS_REFINED_FOR_SWIFT;
 
 /**
+ Get the content of an account_data event of the client (`GET /user/{userId}/account_data/{type}`).
+
+ @param type The event type of the account_data to get.
+ @param timeoutInSeconds The timeout of the request, -1 for the default one.
+ @param success A block object called when the operation succeeds. It provides the event content.
+ @param failure A block object called when the operation fails. The homeserver answers 404 `M_NOT_FOUND`
+                when the account has no event of this type.
+
+ @return a MXHTTPOperation instance.
+ */
+- (MXHTTPOperation*)accountDataOfType:(NSString*)type
+                              timeout:(NSTimeInterval)timeoutInSeconds
+                              success:(void (^)(NSDictionary *content))success
+                              failure:(void (^)(NSError *error))failure;
+
+/**
  Delete an account_data event for the client.
 
  @param type The event type of the account_data to delete (@see kMXAccountDataType* strings)

@@ -1247,6 +1247,33 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
                                  }];
 }
 
+- (MXHTTPOperation*)accountDataOfType:(NSString*)type
+                              timeout:(NSTimeInterval)timeoutInSeconds
+                              success:(void (^)(NSDictionary *content))success
+                              failure:(void (^)(NSError *error))failure
+{
+    NSString *path = [NSString stringWithFormat:@"%@/user/%@/account_data/%@", kMXAPIPrefixPathV3, credentials.userId, type];
+
+    MXWeakify(self);
+    return [httpClient requestWithMethod:@"GET"
+                                    path:path
+                              parameters:nil
+                                 timeout:timeoutInSeconds
+                                 success:^(NSDictionary *JSONResponse) {
+                                     MXStrongifyAndReturnIfNil(self);
+                                     if (success)
+                                     {
+                                         [self dispatchSuccess:^{
+                                             success(JSONResponse);
+                                         }];
+                                     }
+                                 }
+                                 failure:^(NSError *error) {
+                                     MXStrongifyAndReturnIfNil(self);
+                                     [self dispatchFailure:error inBlock:failure];
+                                 }];
+}
+
 - (MXHTTPOperation*)deleteAccountDataWithType:(NSString*)type
                                       success:(void (^)(void))success
                                       failure:(void (^)(NSError *error))failure
