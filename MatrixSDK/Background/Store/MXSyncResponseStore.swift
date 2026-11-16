@@ -46,6 +46,9 @@ public enum MXSyncResponseStoreError: Error {
     /// User account data
     var accountData: [String : Any]? { get set }
     
+    /// User account data contents fetched one by one from the server, by event type. Not read for the push rules.
+    var fetchedAccountData: [String : Any]? { get set }
+    
     /// Delete all data in the store
     func deleteData()
 }

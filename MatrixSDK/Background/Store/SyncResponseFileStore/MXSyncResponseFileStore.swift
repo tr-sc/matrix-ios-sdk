@@ -260,6 +260,17 @@ extension MXSyncResponseFileStore: MXSyncResponseStore {
         }
     }
     
+    public var fetchedAccountData: [String : Any]? {
+        get {
+            return readMetaData().fetchedAccountData
+        }
+        set {
+            var metadata = readMetaData()
+            metadata.fetchedAccountData = newValue
+            saveMetaData(metadata)
+        }
+    }
+    
     
     public func deleteData() {
         let syncResponseIds = self.allSyncResponseIds

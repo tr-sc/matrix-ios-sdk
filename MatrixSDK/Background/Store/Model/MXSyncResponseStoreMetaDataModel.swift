@@ -28,6 +28,10 @@ struct MXSyncResponseStoreMetaDataModel {
     /// User account data
     var accountData: [String : Any]?
     
+    /// User account data contents fetched one by one from the server, by event type. Kept apart from `accountData`,
+    /// which feeds the push rules and must hold what the sync gave.
+    var fetchedAccountData: [String : Any]?
+    
     /// All valid cached sync responses, chronologically ordered
     var syncResponseIds: [String] = []
     
@@ -40,6 +44,7 @@ extension MXSyncResponseStoreMetaDataModel: Codable {
     enum CodingKeys: String, CodingKey {
         case version
         case accountData
+        case fetchedAccountData
         case syncResponseIds
         case outdatedSyncResponseIds
     }
@@ -50,6 +55,9 @@ extension MXSyncResponseStoreMetaDataModel: Codable {
         version = try values.decode(Versions.self, forKey: .version)
         if let data = try values.decodeIfPresent(Data.self, forKey: .accountData) {
             accountData =  try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
+        }
+        if let data = try values.decodeIfPresent(Data.self, forKey: .fetchedAccountData) {
+            fetchedAccountData = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
         }
         syncResponseIds = try values.decode([String].self, forKey: .syncResponseIds)
         outdatedSyncResponseIds = try values.decode([String].self, forKey: .outdatedSyncResponseIds)
@@ -62,6 +70,10 @@ extension MXSyncResponseStoreMetaDataModel: Codable {
         if let accountData = accountData {
             let data = try JSONSerialization.data(withJSONObject: accountData)
             try container.encodeIfPresent(data, forKey: .accountData)
+        }
+        if let fetchedAccountData = fetchedAccountData {
+            let data = try JSONSerialization.data(withJSONObject: fetchedAccountData)
+            try container.encodeIfPresent(data, forKey: .fetchedAccountData)
         }
         try container.encode(syncResponseIds, forKey: .syncResponseIds)
         try container.encode(outdatedSyncResponseIds, forKey: .outdatedSyncResponseIds)

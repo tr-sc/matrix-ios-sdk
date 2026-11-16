@@ -1252,7 +1252,12 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
                               success:(void (^)(NSDictionary *content))success
                               failure:(void (^)(NSError *error))failure
 {
-    NSString *path = [NSString stringWithFormat:@"%@/user/%@/account_data/%@", kMXAPIPrefixPathV3, credentials.userId, type];
+    // One path segment each: a "/" in the type or the user id must not split it.
+    NSMutableCharacterSet *segmentAllowed = [[NSCharacterSet URLPathAllowedCharacterSet] mutableCopy];
+    [segmentAllowed removeCharactersInString:@"/"];
+    NSString *encodedType = [type stringByAddingPercentEncodingWithAllowedCharacters:segmentAllowed];
+    NSString *encodedUserId = [credentials.userId stringByAddingPercentEncodingWithAllowedCharacters:segmentAllowed];
+    NSString *path = [NSString stringWithFormat:@"%@/user/%@/account_data/%@", kMXAPIPrefixPathV3, encodedUserId, encodedType];
 
     MXWeakify(self);
     return [httpClient requestWithMethod:@"GET"

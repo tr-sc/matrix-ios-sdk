@@ -67,6 +67,10 @@ public enum MXBackgroundSyncServiceError: Error {
     /// a burst wait in `asyncTaskQueue` behind the first one, so they look the session up once, without retries.
     private var keyBackupMisses: Set<String> = []
     
+    /// User account data contents last fetched from the server in this process, by event type. Read and written on
+    /// `processingQueue`. A cold process falls back to `MXSyncResponseStore.fetchedAccountData`.
+    private var fetchedAccountDataContents: [String: [String: Any]] = [:]
+    
     /// See MXSyncResponseStoreManager.syncResponseCacheSizeLimit
     public var syncResponseCacheSizeLimit: Int {
         get {
@@ -249,8 +253,9 @@ public enum MXBackgroundSyncServiceError: Error {
     ///
     /// The main application runs Sliding Sync, so this service never syncs the account data, and the MXSession store
     /// snapshot it loaded once at init goes stale in a warm extension. One `GET /account_data/{type}` per call, within
-    /// `Constants.accountDataRequestTimeout`, gives the current value. It is kept in the sync response cache, which
-    /// stands in when the request fails or runs out of time. An account without such event gets nil.
+    /// `Constants.accountDataRequestTimeout`, gives the current value. It is kept in memory and in
+    /// `MXSyncResponseStore.fetchedAccountData` (not in its `accountData`, which feeds the push rules), and stands in
+    /// when the request fails or runs out of time. An account without such event gets nil.
     /// - Parameters:
     ///   - type: The account data event type.
     ///   - completion: Called once, in main thread, with the event content, or nil when the server has no event of
@@ -297,28 +302,32 @@ public enum MXBackgroundSyncServiceError: Error {
         }
     }
     
-    /// The content of the user account data event of the given type kept in the sync response cache.
+    /// The content of the user account data event of the given type last fetched from the server: from this process,
+    /// else from the sync response store. Call on `processingQueue`.
     private func cachedAccountDataContent(ofType type: String) -> [String: Any]? {
-        guard let cached = syncResponseStoreManager.syncResponseStore.accountData,
-              let accountData = MXAccountData(accountData: cached) else {
+        if let content = fetchedAccountDataContents[type] {
+            return content
+        }
+        let stored: [String: Any]? = syncResponseStoreManager.syncResponseStore.fetchedAccountData
+        guard let content = stored?[type] as? [String: Any] else {
             return nil
         }
-        return accountData.accountData(forEventType: type) as? [String: Any]
+        fetchedAccountDataContents[type] = content
+        return content
     }
     
-    /// Keep the content fetched from the server in the sync response cache, or drop the type when the server has none.
+    /// Keep the content fetched from the server, or drop the type when the server has none. Call on `processingQueue`.
     private func cacheAccountDataContent(_ content: [String: Any]?, ofType type: String) {
-        let cached: [String: Any] = syncResponseStoreManager.syncResponseStore.accountData ?? [:]
-        guard let accountData = MXAccountData(accountData: cached) else {
-            return
-        }
+        fetchedAccountDataContents[type] = content
+        let store: MXSyncResponseStore = syncResponseStoreManager.syncResponseStore
+        var stored: [String: Any] = store.fetchedAccountData ?? [:]
         if let content = content {
-            accountData.update(withType: type, data: content)
+            stored[type] = content
         } else {
-            guard accountData.accountData(forEventType: type) != nil else { return }
-            accountData.delete(withType: type)
+            guard stored[type] != nil else { return }
+            stored.removeValue(forKey: type)
         }
-        syncResponseStoreManager.syncResponseStore.accountData = accountData.accountData
+        store.fetchedAccountData = stored
     }
     
     public func readMarkerEvent(forRoomId roomId: String, completion: @escaping (MXResponse<MXEvent>) -> Void) {
@@ -680,11 +689,23 @@ public enum MXBackgroundSyncServiceError: Error {
         syncPushRuleManagerWithAccountData()
     }
     
+    /// Feed the push rules manager with the sync response cache when it holds `m.push_rules`, else with the MXSession
+    /// store snapshot. Under Sliding Sync this service never syncs, so the cache may hold other events only.
     private func syncPushRuleManagerWithAccountData() {
-        if let accountData = syncResponseStoreManager.syncResponseStore.accountData {
+        if let accountData = syncResponseStoreManager.syncResponseStore.accountData,
+           Self.hasPushRules(accountData) {
             pushRulesManager.handleAccountData(accountData)
         } else if let accountData = store.userAccountData ?? nil {
             pushRulesManager.handleAccountData(accountData)
+        } else if let accountData = syncResponseStoreManager.syncResponseStore.accountData {
+            pushRulesManager.handleAccountData(accountData)
         }
+    }
+    
+    private static func hasPushRules(_ accountData: [String: Any]) -> Bool {
+        guard let parsed = MXAccountData(accountData: accountData) else {
+            return false
+        }
+        return parsed.accountData(forEventType: kMXAccountDataTypePushRules) != nil
     }
 }
