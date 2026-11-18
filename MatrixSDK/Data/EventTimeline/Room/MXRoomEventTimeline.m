@@ -1200,8 +1200,27 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
             [self handleRedaction:event];
         }
 
-        // Consider that a message sent by a user has been read by him
-        [room storeLocalReceipt:kMXEventTypeStringRead eventId:event.eventId threadId:event.threadId ?: kMXEventTimelineMain userId:event.sender ts:event.originServerTs];
+        // Consider that a message sent by a user has been read by him. Only an event
+        // that carries a message body (msgtype): a call signal (m.call.notify,
+        // encryption keys, the call summary and log, m.call.member), a reaction, a
+        // sticker, a redaction or a state change of our own does not mean the user
+        // looked at the room - the call screen was open, not the chat. A receipt on
+        // such an event cleared the unread count of the room and moved the read cursor
+        // past messages nobody had read.
+        //
+        // `content` is the decrypted content here, so a room message in an encrypted
+        // room still passes this check, while an encrypted call signal does not. An own
+        // event that could not be decrypted has no msgtype either and does not move the
+        // cursor - acceptable, the client sends a real receipt when the room is on
+        // screen. Do not use `unreadEventTypes` as the allow list instead: it contains
+        // m.room.encrypted, which is the type of every encrypted call signal too.
+        //
+        // Only live events are affected: a bogus receipt an older version already wrote
+        // stays in the store, it is not repaired here.
+        if (event.content[kMXMessageTypeKey] != nil)
+        {
+            [room storeLocalReceipt:kMXEventTypeStringRead eventId:event.eventId threadId:event.threadId ?: kMXEventTimelineMain userId:event.sender ts:event.originServerTs];
+        }
     }
 
     // Store the event
