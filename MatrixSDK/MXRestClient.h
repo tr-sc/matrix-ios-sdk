@@ -2200,6 +2200,16 @@ NS_REFINED_FOR_SWIFT;
                                     failure:(void (^)(NSError *error))failure NS_REFINED_FOR_SWIFT;
 
 
+/**
+ TRSC: opens the connection (DNS, TCP, TLS) of the HTTP client that the first sync will use before that sync
+ is sent, with one unauthenticated GET `_matrix/client/versions` whose answer is ignored. One try, no access
+ token, no token refresh: a cold start overlaps the handshake with the store mount instead of paying it after.
+
+ @param baseURL the sync-edge host as in `slidingSyncWithRequest:baseURL:success:failure:`; nil warms the
+                home server client.
+ */
+- (void)trscPrewarmConnectionToBaseURL:(nullable NSString *)baseURL NS_SWIFT_NAME(trscPrewarmConnection(toBaseURL:));
+
 #pragma mark - Directory operations
 /**
  Get the list of public rooms hosted by a home server.

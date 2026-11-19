@@ -4336,6 +4336,29 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     return client;
 }
 
+- (void)trscPrewarmConnectionToBaseURL:(NSString *)baseURL
+{
+    MXHTTPClient *client = baseURL.length ? [self trscSyncHTTPClientForBaseURL:baseURL] : httpClient;
+    if (!client) return;
+    // The versions path is public on the home server; a host that does not serve it answers 404, which
+    // still leaves the connection open in the client's URLSession pool for the sync that follows.
+    MXHTTPOperation *operation = [client requestWithMethod:@"GET"
+                                                      path:@"_matrix/client/versions"
+                                                parameters:nil
+                                       needsAuthentication:NO
+                                                      data:nil
+                                                   headers:nil
+                                                   timeout:10
+                                            uploadProgress:nil
+                                                   success:^(NSDictionary *JSONResponse) {}
+                                                   failure:^(NSError *error) {
+        MXLogDebug(@"[MXRestClient] trscPrewarmConnection: failed with %@ %ld", error.domain, (long)error.code);
+    }];
+    // A warm-up that failed is not worth a retry: the sync itself goes through the usual ones.
+    operation.maxNumberOfTries = 1;
+    operation.maxTotalAttempts = @1;
+}
+
 - (MXHTTPOperation *)slidingSyncWithRequest:(NSDictionary<NSString *,id> *)request
                                     baseURL:(NSString *)baseURL
                                     success:(void (^)(MXSlidingSyncResponse *))success
