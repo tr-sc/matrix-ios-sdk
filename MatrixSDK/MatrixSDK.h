@@ -196,3 +196,4 @@ FOUNDATION_EXPORT NSString *MatrixSDKVersion;
 #import "MXDevice.h"
 #import "MXSlidingSync.h"
 #import "MXTrscChannelsSyncDelegate.h"
+#import "MXTrscSyncNetWatch.h"

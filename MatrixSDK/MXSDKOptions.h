@@ -60,6 +60,11 @@ NS_ASSUME_NONNULL_BEGIN
  Классическая синхронизация и независимая предзагрузка приложения не затрагиваются. */
 @property (nonatomic) BOOL preserveHistoryOnSlidingSyncGaps;
 
+/** TRSC: the sync loop watches the network path and itself (`MXTrscSyncNetWatch`). A change of the network
+ path or a long-poll silent for its server timeout + 10 s cancels the request in flight and sends a new one
+ with timeout=0 at once. Default NO; the app sets it from the `sync_netwatch` flag. */
+@property (nonatomic) BOOL trscSyncNetWatchEnabled;
+
 /**
  By default Matrix SDK sets an identicon url when user's avatar is undefined
  (see [MXMediaManager urlOfIdenticon:] use).

@@ -57,6 +57,8 @@ NSString *const kMXSessionNewRoomNotification = @"kMXSessionNewRoomNotification"
 NSString *const kMXSessionWillLeaveRoomNotification = @"kMXSessionWillLeaveRoomNotification";
 NSString *const kMXSessionDidLeaveRoomNotification = @"kMXSessionDidLeaveRoomNotification";
 NSString *const kMXSessionDidSyncNotification = @"kMXSessionDidSyncNotification";
+NSString *const kMXSessionTrscSyncRestartNotification = @"kMXSessionTrscSyncRestartNotification";
+NSString *const kMXSessionTrscSyncRestartReasonKey = @"reason";
 NSString *const kMXSessionInvitedRoomsDidChangeNotification = @"kMXSessionInvitedRoomsDidChangeNotification";
 NSString *const kMXSessionOnToDeviceEventNotification = @"kMXSessionOnToDeviceEventNotification";
 NSString *const kMXSessionIgnoredUsersDidChangeNotification = @"kMXSessionIgnoredUsersDidChangeNotification";
@@ -284,6 +286,20 @@ typedef void (^MXOnResumeDone)(void);
 @property (nonatomic) BOOL trscSlidingSyncLongPollInFlight;
 /** TRSC channels: the last answer moved only the extension; such cycles are not logged. */
 @property (nonatomic) BOOL trscLastAnswerWasFastPath;
+/** TRSC sync network watch (`MXSDKOptions.trscSyncNetWatchEnabled`); nil while the option is off. */
+@property (nonatomic, strong, nullable) MXTrscSyncNetWatch *trscNetWatch;
+/** TRSC: bumped by every restart; a retry scheduled before it is dropped (it would run a second loop). */
+@property (nonatomic) NSUInteger trscSyncRestartGeneration;
+/** TRSC: the callbacks of the Sliding Sync request in flight, handed to the request that replaces it. */
+@property (nonatomic, copy, nullable) void (^trscSlidingSyncSuccess)(void);
+@property (nonatomic, copy, nullable) void (^trscSlidingSyncFailure)(NSError *error);
+@property (nonatomic, copy, nullable) NSString *trscSlidingSyncPresence;
+/** TRSC: numbers the legacy /sync requests; an answer of a replaced one is dropped. */
+@property (nonatomic) NSUInteger trscLegacySyncRequestNumber;
+/** TRSC: the legacy /sync request in flight has a caller waiting for it, so it is not restarted. */
+@property (nonatomic) BOOL trscLegacySyncHasCallbacks;
+/** TRSC (B9): rooms subscribed in the requests until an answer to one of them is handled. */
+@property (nonatomic, strong) NSMutableSet<NSString *> *trscNextRequestRoomIds;
 
 @end
 
@@ -1756,6 +1772,8 @@ static NSDictionary *MXSlidingSyncExtensionRooms(NSDictionary *extensions, NSStr
     // Cancel the current server request (if any)
     [eventStreamRequest cancel];
     eventStreamRequest = nil;
+    [self.trscNetWatch stop];
+    self.trscNetWatch = nil;
 
     // Flush pending direct room operations
     [directRoomsOperationsQueue removeAllObjects];
@@ -2191,7 +2209,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                                                                            connectionId:connectionId
                                                                                  ranges:@[@[@0, @(self.slidingSyncRangeEnd)]]
                                                                       roomSubscriptions:refresh ? nil : self.slidingSyncSubscriptions.allObjects
-                                                                  openRoomSubscriptions:refresh ? nil : self.slidingSyncOpenRooms.allObjects
+                                                                  openRoomSubscriptions:refresh ? nil : [self trscOpenRoomIdsForRequest]
                                                                                 timeout:serverTimeout setPresence:setPresence];
     // TRSC channels: asked for on every request and never written into the configuration, so the
     // cursor and the open channels are always the current ones.
@@ -2250,6 +2268,124 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
     self.slidingSyncRequestIdentifier = NSUUID.UUID.UUIDString;
     [eventStreamRequest cancel];
     [self serverSlidingSyncWithServerTimeout:([self canRefreshSlidingSyncList] ? 0 : SERVER_TIMEOUT_MS) success:nil failure:nil setPresence:self.preferredSyncPresenceString];
+}
+
+#pragma mark - TRSC sync network watch
+
+/** `NWPathMonitor`; tests override it with a source they drive. */
+- (id<MXTrscNetworkPathSource>)trscMakeNetworkPathSource
+{
+    return [MXTrscNWPathMonitorSource new];
+}
+
+/** The network watch while `trscSyncNetWatchEnabled` is on: started with the first request after the option
+ went on, stopped with the first one after it went off. */
+- (MXTrscSyncNetWatch *)trscNetWatchForRequest
+{
+    if (!MXSDKOptions.sharedInstance.trscSyncNetWatchEnabled)
+    {
+        [self.trscNetWatch stop];
+        self.trscNetWatch = nil;
+        return nil;
+    }
+    if (!self.trscNetWatch)
+    {
+        MXTrscSyncNetWatch *watch = [[MXTrscSyncNetWatch alloc] initWithPathSource:[self trscMakeNetworkPathSource]];
+        MXWeakify(self);
+        watch.onRestart = ^BOOL(MXTrscSyncRestartReason reason) {
+            MXStrongifyAndReturnValueIfNil(self, NO);
+            return [self trscRestartSyncWithReason:reason];
+        };
+        [watch start];
+        self.trscNetWatch = watch;
+    }
+    return self.trscNetWatch;
+}
+
+- (BOOL)trscRestartSyncWithReason:(MXTrscSyncRestartReason)reason
+{
+    NSString *path = self.trscNetWatch.currentPath.interfaceDescription ?: @"unknown";
+    BOOL restartable = NO;
+    switch (_state)
+    {
+        case MXSessionStateRunning:
+        case MXSessionStateSyncInProgress:
+        case MXSessionStateHomeserverNotReachable:
+        case MXSessionStateSyncError:
+            restartable = YES;
+            break;
+        default:
+            break;
+    }
+    // A legacy request whose caller waits (the first sync of `start`) would report the cancel as its failure.
+    if (!eventStreamRequest || !restartable || (!self.slidingSyncConfiguration && self.trscLegacySyncHasCallbacks))
+    {
+        MXLogDebug(@"[MXSession][SyncNet] sync_restart_declined reason=%@ state=%@ request=%@ path=%@",
+                   reason, [MXTools readableSessionState:_state], eventStreamRequest ? @"YES" : @"NO", path);
+        return NO;
+    }
+
+    MXLogDebug(@"[MXSession][SyncNet] sync_restart reason=%@ state=%@ loop=%@ path=%@",
+               reason, [MXTools readableSessionState:_state], self.slidingSyncConfiguration ? @"sliding" : @"legacy", path);
+    // Retries scheduled by `handleServerSyncError` belong to the replaced request.
+    self.trscSyncRestartGeneration++;
+    if (_state == MXSessionStateHomeserverNotReachable || _state == MXSessionStateSyncError)
+    {
+        [self setState:MXSessionStateSyncInProgress];
+    }
+
+    if (self.slidingSyncConfiguration)
+    {
+        self.trscSlidingSyncLongPollInFlight = NO;
+        // A new identifier first: the cancelled request's answer, whichever comes, is then ignored.
+        self.slidingSyncRequestIdentifier = NSUUID.UUID.UUIDString;
+        [eventStreamRequest cancel];
+        // The sync may go to sync-edge; sends go to the homeserver, whose connection also died with the path.
+        BOOL networkReason = [reason isEqualToString:MXTrscSyncRestartReasonNetworkChange]
+            || [reason isEqualToString:MXTrscSyncRestartReasonNetworkRestored];
+        if (networkReason && [self.trscChannelsDelegate trscChannelsSyncBaseURLForSession:self].length)
+        {
+            [matrixRestClient trscPrewarmConnectionToBaseURL:nil];
+        }
+        [self serverSlidingSyncWithServerTimeout:0
+                                         success:self.trscSlidingSyncSuccess
+                                         failure:self.trscSlidingSyncFailure
+                                     setPresence:self.trscSlidingSyncPresence ?: self.preferredSyncPresenceString];
+    }
+    else
+    {
+        MXHTTPOperation *replaced = eventStreamRequest;
+        eventStreamRequest = nil;
+        [replaced cancel];
+        [self serverSyncWithServerTimeout:0 success:nil failure:nil clientTimeout:CLIENT_TIMEOUT_MS setPresence:self.preferredSyncPresenceString];
+    }
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionTrscSyncRestartNotification
+                                                        object:self
+                                                      userInfo:@{kMXSessionTrscSyncRestartReasonKey: reason}];
+    return YES;
+}
+
+- (void)trscSubscribeRoomsInNextSyncRequest:(NSArray<NSString *> *)roomIds
+{
+    if (!roomIds.count || !self.slidingSyncConfiguration) return;
+    if (!self.trscNextRequestRoomIds) self.trscNextRequestRoomIds = [NSMutableSet set];
+    [self.trscNextRequestRoomIds addObjectsFromArray:roomIds];
+    MXLogDebug(@"[MXSession][SlidingSync] next request subscribes rooms=%tu", self.trscNextRequestRoomIds.count);
+    // A long-poll in flight would carry the subscription only after its answer, up to the server timeout.
+    if (self.trscSlidingSyncLongPollInFlight && _state == MXSessionStateRunning)
+    {
+        [self trscRestartSyncWithReason:MXTrscSyncRestartReasonSubscription];
+    }
+}
+
+/** The open rooms and the rooms of `trscSubscribeRoomsInNextSyncRequest:`. */
+- (NSArray<NSString *> *)trscOpenRoomIdsForRequest
+{
+    if (!self.trscNextRequestRoomIds.count) return self.slidingSyncOpenRooms.allObjects;
+    NSMutableSet<NSString *> *roomIds = [NSMutableSet setWithArray:self.slidingSyncOpenRooms.allObjects];
+    [roomIds unionSet:self.trscNextRequestRoomIds];
+    return roomIds.allObjects;
 }
 
 /**
@@ -2311,11 +2447,22 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                    requestedPosition.length ? @"present" : @"missing",
                    syncBaseURL.length ? @"sync-edge" : @"homeserver");
     }
+    // TRSC: what a restart hands to the request that replaces this one, and the rooms of
+    // `trscSubscribeRoomsInNextSyncRequest:` this request subscribes.
+    self.trscSlidingSyncSuccess = success;
+    self.trscSlidingSyncFailure = failure;
+    self.trscSlidingSyncPresence = setPresence;
+    NSDictionary *requestedSubscriptions = request[@"room_subscriptions"];
+    NSSet<NSString *> *requestedNextRoomIds = [self.trscNextRequestRoomIds objectsPassingTest:^BOOL(NSString *roomId, BOOL *stop) {
+        return requestedSubscriptions[roomId] != nil;
+    }];
+    [[self trscNetWatchForRequest] syncRequestDidStartWithServerTimeout:[request[@"timeout"] unsignedIntegerValue]];
     MXWeakify(self);
     eventStreamRequest = [matrixRestClient slidingSyncWithRequest:request baseURL:syncBaseURL success:^(MXSlidingSyncResponse *response) {
         MXStrongifyAndReturnIfNil(self);
         if (!self->eventStreamRequest || ![self.slidingSyncRequestIdentifier isEqual:requestIdentifier]) return;
         self.trscSlidingSyncLongPollInFlight = NO;
+        [self.trscNetWatch syncRequestDidFinishWithResponse:YES];
         if (syncBaseURL) [self.trscChannelsDelegate session:self trscChannelsSyncRequestToBaseURL:syncBaseURL didCompleteWithError:nil];
         // TRSC channels fast path: only the extension moved. Matrix has nothing to convert, handle
         // or persist (FR-APP-SYN-01), so the loop goes straight on.
@@ -2360,6 +2507,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                             [self.slidingSyncSubscriptionFailures removeObjectForKey:roomId];
                         }
                     }
+                    if (requestedNextRoomIds.count) [self.trscNextRequestRoomIds minusSet:requestedNextRoomIds];
                 } storeCompletion:^{
                     if (!self->eventStreamRequest || ![self.slidingSyncRequestIdentifier isEqual:requestIdentifier]) return;
                     self.slidingSyncConnectionId = request[@"conn_id"];
@@ -2426,6 +2574,7 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         if (![self.slidingSyncRequestIdentifier isEqual:requestIdentifier]) return;
         self.trscSlidingSyncLongPollInFlight = NO;
         self.trscLastAnswerWasFastPath = NO;
+        [self.trscNetWatch syncRequestDidFinishWithResponse:NO];
         // TRSC channels: a failure of sync-edge goes to the delegate, which may move to another
         // host (a node to the shared name, the shared name to the homeserver) and ask to resend now.
         if (syncBaseURL && [self shouldReportTrscChannelsSyncFailure:error]
@@ -2543,15 +2692,23 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
         
         MXLogDebug(@"[MXSession] Do a server sync%@ from token: %@", _catchingUp ? @" (catching up)" : @"", streamToken);
         
+        // TRSC: a replaced request's answer is dropped; the network watch sets the client timeout of a
+        // long-poll to the server one + 15 s (its watchdog fires at + 10 s).
+        NSUInteger trscRequestNumber = ++self.trscLegacySyncRequestNumber;
+        self.trscLegacySyncHasCallbacks = success != nil || failure != nil;
+        MXTrscSyncNetWatch *trscNetWatch = [self trscNetWatchForRequest];
+        if (trscNetWatch && serverTimeout > 0) clientTimeout = serverTimeout + 15000;
+        [trscNetWatch syncRequestDidStartWithServerTimeout:serverTimeout];
         MXWeakify(self);
         eventStreamRequest = [matrixRestClient syncFromToken:streamToken serverTimeout:serverTimeout clientTimeout:clientTimeout setPresence:setPresence filter:self.syncFilterId success:^(MXSyncResponse *liveResponse) {
             MXStrongifyAndReturnIfNil(self);
             
             // Make sure [MXSession close] or [MXSession pause] has not been called before the server response
-            if (!self->eventStreamRequest)
+            if (!self->eventStreamRequest || trscRequestNumber != self.trscLegacySyncRequestNumber)
             {
                 return;
             }
+            [self.trscNetWatch syncRequestDidFinishWithResponse:YES];
             
             NSTimeInterval duration = [[NSDate date] timeIntervalSinceDate:startDate];
             MXLogDebug(@"[MXSession] Received sync response in %.0fms", duration * 1000);
@@ -2561,6 +2718,8 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
             
             dispatch_group_leave(initialSyncDispatchGroup);
         } failure:^(NSError *error) {
+            if (trscRequestNumber != self.trscLegacySyncRequestNumber) return;
+            [self.trscNetWatch syncRequestDidFinishWithResponse:NO];
             [self handleServerSyncError:error forRequestWithServerTimeout:serverTimeout success:success failure:failure];
         }];
     }
@@ -2824,10 +2983,11 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                 [self setState:MXSessionStateSyncError];
 
                 // Retry later
+                NSUInteger trscGeneration = self.trscSyncRestartGeneration;
                 dispatch_time_t delayTime = dispatch_time(DISPATCH_TIME_NOW, RETRY_SYNC_AFTER_MXERROR_MS * NSEC_PER_MSEC);
                 dispatch_after(delayTime, dispatch_get_main_queue(), ^(void) {
 
-                    if (self->eventStreamRequest)
+                    if (self->eventStreamRequest && trscGeneration == self.trscSyncRestartGeneration)
                     {
                         MXLogDebug(@"[MXSession] Retry resuming events stream after error %@", mxError.errcode);
                         [self serverSyncWithServerTimeout:0 success:success failure:failure clientTimeout:CLIENT_TIMEOUT_MS setPresence:self.preferredSyncPresenceString];
@@ -2849,10 +3009,11 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                     // Relaunch the request in a random near futur.
                     // Random time it used to avoid all Matrix clients to retry all in the same time
                     // if there is server side issue like server restart
+                    NSUInteger trscGeneration = self.trscSyncRestartGeneration;
                     dispatch_time_t delayTime = dispatch_time(DISPATCH_TIME_NOW, [MXHTTPClient timeForRetry:self->eventStreamRequest] * NSEC_PER_MSEC);
                     dispatch_after(delayTime, dispatch_get_main_queue(), ^(void) {
 
-                        if (self->eventStreamRequest)
+                        if (self->eventStreamRequest && trscGeneration == self.trscSyncRestartGeneration)
                         {
                             MXLogDebug(@"[MXSession] Retry resuming events stream");
                             [self setState:MXSessionStateSyncInProgress];
@@ -2863,9 +3024,16 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                 else
                 {
                     // The device is not connected to the internet, wait for the connection to be up again before retrying
+                    NSUInteger trscGeneration = self.trscSyncRestartGeneration;
                     __block __weak id reachabilityObserver =
                     [[NSNotificationCenter defaultCenter] addObserverForName:AFNetworkingReachabilityDidChangeNotification object:nil queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *note) {
 
+                        // TRSC: the network watch restarted the sync already; this wait is over.
+                        if (trscGeneration != self.trscSyncRestartGeneration)
+                        {
+                            [[NSNotificationCenter defaultCenter] removeObserver:reachabilityObserver];
+                            return;
+                        }
                         if (networkReachabilityManager.isReachable && self->eventStreamRequest)
                         {
                             [[NSNotificationCenter defaultCenter] removeObserver:reachabilityObserver];

@@ -1357,6 +1357,8 @@
 		E3027C6D988FD215E02CB33A /* Pods_MatrixSDKTests_macOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 101542DD85B938AF4EAF8A94 /* Pods_MatrixSDKTests_macOS.framework */; };
 		E546D7C181017A4043F19887 /* Pods_MatrixSDK_MatrixSDK_macOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E61A2EC65F9822D383157D48 /* Pods_MatrixSDK_MatrixSDK_macOS.framework */; };
 		E9F7B0761B558FCEF10F75A3 /* MXSlidingSync.m in Sources */ = {isa = PBXBuildFile; fileRef = 55F16DEB455801AB084ABB62 /* MXSlidingSync.m */; };
+		D3A0000000000000000000B1 /* MXTrscSyncNetWatch.m in Sources */ = {isa = PBXBuildFile; fileRef = D3A0000000000000000000A1 /* MXTrscSyncNetWatch.m */; };
+		D3A0000000000000000000B2 /* MXTrscSyncNetWatch.m in Sources */ = {isa = PBXBuildFile; fileRef = D3A0000000000000000000A1 /* MXTrscSyncNetWatch.m */; };
 		EC05473425FF8A3C0047ECD7 /* MXVirtualRoomInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = EC05473225FF8A3C0047ECD7 /* MXVirtualRoomInfo.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		EC05473525FF8A3C0047ECD7 /* MXVirtualRoomInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = EC05473225FF8A3C0047ECD7 /* MXVirtualRoomInfo.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		EC05473625FF8A3C0047ECD7 /* MXVirtualRoomInfo.m in Sources */ = {isa = PBXBuildFile; fileRef = EC05473325FF8A3C0047ECD7 /* MXVirtualRoomInfo.m */; };
@@ -2496,6 +2498,7 @@
 		3AF85F9126FC7AE800A9E67B /* MXSpaceNotificationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MXSpaceNotificationState.swift; sourceTree = "<group>"; };
 		415A2B7BEAF8D5462A575DAF /* Pods-MatrixSDK-MatrixSDK-iOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MatrixSDK-MatrixSDK-iOS.release.xcconfig"; path = "Target Support Files/Pods-MatrixSDK-MatrixSDK-iOS/Pods-MatrixSDK-MatrixSDK-iOS.release.xcconfig"; sourceTree = "<group>"; };
 		55F16DEB455801AB084ABB62 /* MXSlidingSync.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = MXSlidingSync.m; sourceTree = "<group>"; };
+		D3A0000000000000000000A1 /* MXTrscSyncNetWatch.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = MXTrscSyncNetWatch.m; path = ../TRSC/MXTrscSyncNetWatch.m; sourceTree = "<group>"; };
 		66398BA427A4085B00466E89 /* MXRefreshResponse.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MXRefreshResponse.m; sourceTree = "<group>"; };
 		66398BA727A408C000466E89 /* MXRefreshResponse.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MXRefreshResponse.h; sourceTree = "<group>"; };
 		66836AB527CFA17200515780 /* MXEventStreamService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MXEventStreamService.swift; sourceTree = "<group>"; };
@@ -4449,6 +4452,7 @@
 			children = (
 				1475A2B4A62A8F306260E6FD /* MXSlidingSync.h */,
 				55F16DEB455801AB084ABB62 /* MXSlidingSync.m */,
+				D3A0000000000000000000A1 /* MXTrscSyncNetWatch.m */,
 			);
 			path = SlidingSync;
 			sourceTree = "<group>";
@@ -7066,6 +7070,7 @@
 				320DFDE519DD99B60068622A /* MXRestClient.m in Sources */,
 				ED5EF152297AB33E00A5ADDA /* MXCryptoV2Factory.swift in Sources */,
 				E9F7B0761B558FCEF10F75A3 /* MXSlidingSync.m in Sources */,
+				D3A0000000000000000000B1 /* MXTrscSyncNetWatch.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -7700,6 +7705,7 @@
 				EC60EDD3265CFECC00B39A4E /* MXRoomSyncSummary.m in Sources */,
 				ED5EF153297AB33E00A5ADDA /* MXCryptoV2Factory.swift in Sources */,
 				E04C061DE83A937493831DE0 /* MXSlidingSync.m in Sources */,
+				D3A0000000000000000000B2 /* MXTrscSyncNetWatch.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
