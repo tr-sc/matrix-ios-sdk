@@ -45,6 +45,10 @@ Pod::Spec.new do |s|
       ss.dependency 'Realm', '10.27.0'
       ss.dependency 'libbase58', '~> 0.1.4'
       ss.dependency 'MatrixSDKCrypto', '0.17.0', :configurations => ["DEBUG", "RELEASE"], :inhibit_warnings => true
+
+      # TRSC: MXSQLiteStore (ADR-0022). MatrixSDKCrypto exports its own sqlite3_* symbols, so the app's Podfile
+      # puts SQLCipher first in this pod's OTHER_LDFLAGS; MXSQLiteDatabase fails closed if it is not.
+      ss.dependency 'SQLCipher', '~> 4.5'
   end
 
   s.subspec 'JingleCallStack' do |ss|

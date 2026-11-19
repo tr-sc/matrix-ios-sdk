@@ -20,7 +20,24 @@
 #import "MXEventRelations.h"
 
 
+NSString *const kMXEventUnsignedTrscCountKey = @"trsc.count";
+
 @implementation MXEventUnsignedData
+
+/// The server sends a string (`Count`'s `Display`); a number is accepted too so a proxy that re-encodes JSON
+/// does not drop the position. Anything else is ignored.
++ (NSString *)trscCountFromJSONValue:(id)value
+{
+    if ([value isKindOfClass:NSString.class])
+    {
+        return ((NSString *)value).length ? value : nil;
+    }
+    if ([value isKindOfClass:NSNumber.class] && CFNumberGetType((CFNumberRef)value) != kCFNumberCharType)
+    {
+        return [NSString stringWithFormat:@"%lld", ((NSNumber *)value).longLongValue];
+    }
+    return nil;
+}
 
 
 #pragma mark - MXJSONModel
@@ -36,6 +53,7 @@
         }
 
         MXJSONModelSetUInt64(unsignedData->_trscExpiresAt, JSONDictionary[@"im.trsc.expires_at"]);
+        unsignedData->_trscCount = [self trscCountFromJSONValue:JSONDictionary[kMXEventUnsignedTrscCountKey]];
         MXJSONModelSetString(unsignedData->_replacesState, JSONDictionary[@"replaces_state"]);
         MXJSONModelSetString(unsignedData->_prevSender, JSONDictionary[@"prev_sender"]);
         MXJSONModelSetDictionary(unsignedData->_prevContent, JSONDictionary[@"prev_content"]);
@@ -60,6 +78,10 @@
         if (_trscExpiresAt)
         {
             JSONDictionary[@"im.trsc.expires_at"] = @(_trscExpiresAt);
+        }
+        if (_trscCount)
+        {
+            JSONDictionary[kMXEventUnsignedTrscCountKey] = _trscCount;
         }
         if (_replacesState)
         {
@@ -104,6 +126,7 @@
     {
         _ageLocalTs = (uint64_t)[aDecoder decodeInt64ForKey:@"ageLocalTs"];
         _trscExpiresAt = (uint64_t)[aDecoder decodeInt64ForKey:@"trscExpiresAt"];
+        _trscCount = [aDecoder decodeObjectForKey:@"trscCount"];
         _replacesState = [aDecoder decodeObjectForKey:@"replacesState"];
         _prevSender = [aDecoder decodeObjectForKey:@"prevSender"];
         _prevContent = [aDecoder decodeObjectForKey:@"prevContent"];
@@ -119,6 +142,7 @@
 {
     [aCoder encodeInt64:(int64_t)_ageLocalTs forKey:@"ageLocalTs"];
     [aCoder encodeInt64:(int64_t)_trscExpiresAt forKey:@"trscExpiresAt"];
+    [aCoder encodeObject:_trscCount forKey:@"trscCount"];
     [aCoder encodeObject:_replacesState forKey:@"replacesState"];
     [aCoder encodeObject:_prevSender forKey:@"prevSender"];
     [aCoder encodeObject:_prevContent forKey:@"prevContent"];

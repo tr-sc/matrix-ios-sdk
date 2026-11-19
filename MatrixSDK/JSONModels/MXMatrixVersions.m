@@ -50,6 +50,7 @@ static NSString* const kJSONKeyMSC3882 = @"org.matrix.msc3882";
 static NSString* const kJSONKeyMSC3773 = @"org.matrix.msc3773";
 static NSString* const kJSONKeyMSC3912Unstable = @"org.matrix.msc3912";
 static NSString* const kJSONKeyMSC3912 = @"org.matrix.msc3912.stable";
+static NSString* const kJSONKeyTrscEventCount = @"im.trsc.event_count";
 
 @interface MXMatrixVersions ()
 
@@ -150,6 +151,11 @@ static NSString* const kJSONKeyMSC3912 = @"org.matrix.msc3912.stable";
 - (BOOL)supportsAuthenticatedMedia
 {
     return [self serverSupportsVersion:MXMatrixClientServerAPIVersion.v1_11];
+}
+
+- (BOOL)supportsTrscEventCount
+{
+    return [self serverSupportsFeature:kJSONKeyTrscEventCount];
 }
 
 #pragma mark - Private

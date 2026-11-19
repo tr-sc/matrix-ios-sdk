@@ -129,6 +129,12 @@ extern const struct MXMatrixVersionsFeatureStruct MXMatrixVersionsFeature;
  */
 @property (nonatomic, readonly) BOOL supportsAuthenticatedMedia;
 
+/**
+ TRSC: every timeline event carries its position in `unsigned["trsc.count"]` (unstable feature
+ `im.trsc.event_count`). `MXSQLiteStore` is used only when this is YES (ADR-0022).
+ */
+@property (nonatomic, readonly) BOOL supportsTrscEventCount;
+
 @end
 
 NS_ASSUME_NONNULL_END

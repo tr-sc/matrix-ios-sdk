@@ -22,6 +22,9 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// TRSC: key of the event's timeline position in `unsigned` (Tuwunel `trsc_count.rs`).
+FOUNDATION_EXPORT NSString *const kMXEventUnsignedTrscCountKey;
+
 @interface MXEventUnsignedData : MXJSONModel
 
 /**
@@ -44,6 +47,13 @@ NS_ASSUME_NONNULL_BEGIN
  homeserver redacts this event. 0 when the event is not auto-deleted.
  */
 @property (nonatomic, readonly) uint64_t trscExpiresAt;
+
+/**
+ TRSC: `unsigned["trsc.count"]`, the event's timeline position on the homeserver in the exact string form `/messages`
+ takes as `from` (signed decimal, negative for backfilled events). nil when the server did not send it.
+ Parsed form: `MXEvent.trscOrder` (`MXEvent+TrscOrder.h`).
+ */
+@property (nonatomic, readonly, nullable) NSString *trscCount;
 
 /**
  The event id of the state event this event replaces.

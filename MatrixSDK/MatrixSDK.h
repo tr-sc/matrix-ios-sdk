@@ -29,6 +29,11 @@ FOUNDATION_EXPORT NSString *MatrixSDKVersion;
 #import "MXWarnings.h"
 
 #import "MXStore.h"
+#import "MXTimelineStore.h"
+#import "MXSQLiteStore.h"
+#import "MXSQLiteDatabase.h"
+#import "MXSQLiteKeyProvider.h"
+#import "MXSQLiteSchema.h"
 #import "MXRoomEventTimeline.h"
 #import "MXNoStore.h"
 #import "MXMemoryStore.h"
@@ -103,6 +108,7 @@ FOUNDATION_EXPORT NSString *MatrixSDKVersion;
 #import "MXServiceTerms.h"
 
 #import "MXEventUnsignedData.h"
+#import "MXEvent+TrscOrder.h"
 #import "MXEventRelations.h"
 #import "MXEventAnnotationChunk.h"
 #import "MXEventAnnotation.h"
