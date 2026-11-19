@@ -108,6 +108,11 @@ static const NSTimeInterval kMXSessionInviteJoinRetryInterval = 60;
  */
 static const NSTimeInterval kMXSessionDirectRoomsEchoTimeout = 60;
 
+/**
+ Summaries and rooms mounted from the store per main runloop pass at launch.
+ */
+static const NSUInteger kMXSessionMountBatchSize = 50;
+
 
 // Block called when MSSession resume is complete
 typedef void (^MXOnResumeDone)(void);
@@ -465,15 +470,26 @@ typedef void (^MXOnResumeDone)(void);
 
         self.storeService.aggregations = [[MXAggregations alloc] initWithMatrixSession:self];
 
-        // Check if the user has enabled crypto
+        // Building the crypto module opens the Rust store (a 500k-round KDF) off the main thread and
+        // reads neither rooms nor summaries, while mounting the store needs neither crypto nor its
+        // keys. Run both at once so a cold start pays max(crypto, mount) instead of their sum. They
+        // join on the main thread below: `_crypto` is assigned and StoreDataReady is set only when both
+        // are done, so no sync (started from onStoreDataReady) and no decryption runs without crypto.
+        __block BOOL cryptoFinished = NO;
+        __block BOOL mountFinished = NO;
+        __block BOOL startupFailed = NO;
+        __block BOOL fixSummariesLastMessages = NO;
+        __block id<MXCrypto> builtCrypto = nil;
+
         MXWeakify(self);
-        [self initializeCryptoWithProgress:^(double progress) {
-            [self.startupProgress updateProgressForStage:MXSessionStartupStageStoreMigration progress:progress];
-            
-        } success:^(id<MXCrypto> crypto) {
+        void (^joinIfReady)(void) = ^{
             MXStrongifyAndReturnIfNil(self);
-            
-            self->_crypto = crypto;
+            if (!cryptoFinished || !mountFinished || startupFailed)
+            {
+                return;
+            }
+
+            self->_crypto = builtCrypto;
 
             // Sanity check: The session may be closed before the end of this operation.
             if (!self->matrixRestClient)
@@ -481,150 +497,64 @@ typedef void (^MXOnResumeDone)(void);
                 return;
             }
 
-            // Sliding Sync configuration/position is restored only by start,
-            // AFTER setStore. Mount its persisted user/account data and rooms
-            // now as well, without treating a Sliding Sync position as a
-            // classic /sync token or changing the selected sync transport.
-            BOOL hasSlidingSyncCheckpoint = MXSlidingSyncHasPersistedPosition(self.credentials);
-            if (self.store.isPermanent && (self.isEventStreamInitialised || hasSlidingSyncCheckpoint))
+            // Paginates and decrypts last messages, so it waits for crypto.
+            if (fixSummariesLastMessages)
             {
-                // Mount data from the permanent store
-                MXLogDebug(@"[MXSession] Loading room state events to build MXRoom objects...");
+                [self fixRoomsSummariesLastMessageWithMaxServerPaginationCount:MXRoomSummaryPaginationChunkSize
+                                                                         force:YES
+                                                                      progress:nil
+                                                                    completion:nil];
+            }
 
-                // Create myUser from the store
-                MXUser *myUser = [self.store userWithUserId:self->matrixRestClient.credentials.userId];
-                
-                // My user is a MXMyUser object
-                if ([myUser isKindOfClass:[MXMyUser class]])
+            MXLogDebug(@"[MXSession] Total time to mount SDK data from MXStore: %.0fms", [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
+
+            [self setState:MXSessionStateStoreDataReady];
+
+            // The SDK client can use this data
+            onStoreDataReady();
+        };
+
+        // Check if the user has enabled crypto
+        [self initializeCryptoWithProgress:^(double progress) {
+            [self.startupProgress updateProgressForStage:MXSessionStartupStageStoreMigration progress:progress];
+            
+        } success:^(id<MXCrypto> crypto) {
+            builtCrypto = crypto;
+            cryptoFinished = YES;
+            joinIfReady();
+        } failure:^(NSError *error) {
+            // A failure can be reported synchronously; keep the join state on the main thread.
+            dispatch_block_t fail = ^{
+                if (startupFailed)
                 {
-                    self->_myUser = (MXMyUser *)myUser;
+                    return;
                 }
-                else
+                startupFailed = YES;
+                if (failure)
                 {
-                    self->_myUser = [[MXMyUser alloc] initWithUserId:myUser.userId ?: self.credentials.userId andDisplayname:myUser.displayname andAvatarUrl:myUser.avatarUrl];
+                    failure(error);
                 }
-                
-                self->_myUser.mxSession = self;
-                
-                // Use the cached agreement to identity server terms.
-                if (self.identityService)
-                {
-                    self.identityService.areAllTermsAgreed = self.store.areAllIdentityServerTermsAgreed;
-                }
-
-                // Load user account data
-                [self handleAccountData:self.store.userAccountData];
-                MXLogDebug(@"[MXSession] mounted cached profile: slidingCheckpoint=%@ user=%@ displayName=%@ accountData=%@",
-                           hasSlidingSyncCheckpoint ? @"YES" : @"NO",
-                           myUser ? @"present" : @"missing",
-                           self.myUser.displayname.length ? @"present" : @"missing",
-                           self.store.userAccountData.count ? @"present" : @"missing");
-
-                // Refresh identity server terms with complete account data
-                [self refreshIdentityServerServiceTerms];
-
-                // Load MXRoomSummaries from the store
-                NSDate *startDate2 = [NSDate date];
-
-                dispatch_group_t dispatchGroupRooms = dispatch_group_create();
-                NSUInteger numberOfSummaries = self.store.roomSummaryStore.countOfRooms;
-                taskProfile.units = numberOfSummaries;
-                NSArray<NSString *> *roomIDs = self.store.roomIds;
-                BOOL fixSummariesLastMessages = NO;
-                if (numberOfSummaries < roomIDs.count)
-                {
-                    MXLogWarning(@"[MXFileStore] Detected missing rooms, expected: %tu, got: %tu", roomIDs.count, numberOfSummaries);
-
-                    fixSummariesLastMessages = YES;
-                    //  remove all room summaries
-                    [self.store.roomSummaryStore removeAllSummaries];
-
-                    //  recreate room summaries
-                    for (NSString *roomID in roomIDs)
-                    {
-                        dispatch_group_enter(dispatchGroupRooms);
-
-                        [MXRoomState loadRoomStateFromStore:self.store
-                                                 withRoomId:roomID
-                                              matrixSession:self
-                                                 onComplete:^(MXRoomState *roomState) {
-                            MXRoomSummary *summary = [self getOrCreateRoomSummary:roomID];
-                            [self.roomSummaryUpdateDelegate session:self
-                                                  updateRoomSummary:summary
-                                                    withStateEvents:roomState.stateEvents
-                                                          roomState:roomState];
-                            [summary save:YES];
-                            dispatch_group_leave(dispatchGroupRooms);
-                        }];
-                    }
-                }
-
-                dispatch_group_notify(dispatchGroupRooms, dispatch_get_main_queue(), ^{
-
-                    NSArray<NSString*> *roomIds = self.store.roomSummaryStore.rooms;
-
-                    MXLogDebug(@"[MXSession] Read %lu room ids in %.0fms", (unsigned long)roomIds.count, [[NSDate date] timeIntervalSinceDate:startDate2] * 1000);
-
-                    // Fetch and materialise summaries on the store queue. In particular, encrypted
-                    // MXRoomLastMessage payloads must not be decrypted or unarchived on the main thread.
-                    [self.store.roomSummaryStore fetchAllSummaries:^(NSArray<id<MXRoomSummaryProtocol>> *summaries) {
-                        // Pre-warm roomSummaries cache to avoid N per-room store fetches in the loadRoom: loop.
-                        for (id<MXRoomSummaryProtocol> summary in summaries)
-                        {
-                            if (roomSummaries[summary.roomId] == nil)
-                            {
-                                MXRoomSummary *roomSummary = [[MXRoomSummary alloc] initWithSummaryModel:summary];
-                                [roomSummary setMatrixSession:self];
-                                roomSummaries[summary.roomId] = roomSummary;
-                            }
-                        }
-
-                        // Create MXRooms from their states stored in the store
-                        NSDate *startDate3 = [NSDate date];
-                        for (NSString *roomId in roomIds)
-                        {
-                            [self loadRoom:roomId];
-                        }
-
-                        MXLogDebug(@"[MXSession] Built %lu MXRooms in %.0fms", (unsigned long)self->rooms.count, [[NSDate date] timeIntervalSinceDate:startDate3] * 1000);
-
-                        if (fixSummariesLastMessages)
-                        {
-                            [self fixRoomsSummariesLastMessageWithMaxServerPaginationCount:MXRoomSummaryPaginationChunkSize
-                                                                                     force:YES
-                                                                                  progress:nil
-                                                                                completion:nil];
-                        }
-
-                        taskProfile.units = self->rooms.count;
-                        [MXSDKOptions.sharedInstance.profiler stopMeasuringTaskWithProfile:taskProfile];
-                        MXLogDebug(@"[MXSession] Total time to mount SDK data from MXStore: %.0fms", taskProfile.duration * 1000);
-
-                        [self setState:MXSessionStateStoreDataReady];
-
-                        // The SDK client can use this data
-                        onStoreDataReady();
-                    }];
-                });
+            };
+            if (NSThread.isMainThread)
+            {
+                fail();
             }
             else
             {
-                // Create self.myUser instance to expose the user id as soon as possible
-                self->_myUser = [[MXMyUser alloc] initWithUserId:self->matrixRestClient.credentials.userId];
-                self->_myUser.mxSession = self;
-                
-                MXLogDebug(@"[MXSession] Total time to mount SDK data from MXStore: %.0fms", [[NSDate date] timeIntervalSinceDate:startDate] * 1000);
-                
-                [self setState:MXSessionStateStoreDataReady];
-                
-                // The SDK client can use this data
-                onStoreDataReady();
+                dispatch_async(dispatch_get_main_queue(), fail);
             }
-        } failure:^(NSError *error) {
-            if (failure)
-            {
-                failure(error);
-            }
+        }];
+
+        // Crypto can fail synchronously (missing credentials): the start is over then, mount nothing.
+        if (startupFailed)
+        {
+            return;
+        }
+
+        [self mountStoreDataWithTaskProfile:taskProfile completion:^(BOOL needsLastMessagesFix) {
+            fixSummariesLastMessages = needsLastMessagesFix;
+            mountFinished = YES;
+            joinIfReady();
         }];
 
     } failure:^(NSError *error) {
@@ -635,6 +565,172 @@ typedef void (^MXOnResumeDone)(void);
             failure(error);
         }
     }];
+}
+
+/// Mounts user, account data, summaries and rooms from the store. Calls `completion` on the main
+/// thread once `rooms` is complete. Does not touch `crypto`: it runs while the crypto module is built.
+- (void)mountStoreDataWithTaskProfile:(MXTaskProfile *)taskProfile completion:(void (^)(BOOL needsLastMessagesFix))completion
+{
+    // Sliding Sync configuration/position is restored only by start,
+    // AFTER setStore. Mount its persisted user/account data and rooms
+    // now as well, without treating a Sliding Sync position as a
+    // classic /sync token or changing the selected sync transport.
+    BOOL hasSlidingSyncCheckpoint = MXSlidingSyncHasPersistedPosition(self.credentials);
+    if (!(self.store.isPermanent && (self.isEventStreamInitialised || hasSlidingSyncCheckpoint)))
+    {
+        // Create self.myUser instance to expose the user id as soon as possible
+        _myUser = [[MXMyUser alloc] initWithUserId:matrixRestClient.credentials.userId];
+        _myUser.mxSession = self;
+        completion(NO);
+        return;
+    }
+
+    // Mount data from the permanent store
+    MXLogDebug(@"[MXSession] Loading room state events to build MXRoom objects...");
+
+    // Create myUser from the store
+    MXUser *myUser = [self.store userWithUserId:matrixRestClient.credentials.userId];
+    
+    // My user is a MXMyUser object
+    if ([myUser isKindOfClass:[MXMyUser class]])
+    {
+        _myUser = (MXMyUser *)myUser;
+    }
+    else
+    {
+        _myUser = [[MXMyUser alloc] initWithUserId:myUser.userId ?: self.credentials.userId andDisplayname:myUser.displayname andAvatarUrl:myUser.avatarUrl];
+    }
+    
+    _myUser.mxSession = self;
+    
+    // Use the cached agreement to identity server terms.
+    if (self.identityService)
+    {
+        self.identityService.areAllTermsAgreed = self.store.areAllIdentityServerTermsAgreed;
+    }
+
+    // Load user account data
+    [self handleAccountData:self.store.userAccountData];
+    MXLogDebug(@"[MXSession] mounted cached profile: slidingCheckpoint=%@ user=%@ displayName=%@ accountData=%@",
+               hasSlidingSyncCheckpoint ? @"YES" : @"NO",
+               myUser ? @"present" : @"missing",
+               self.myUser.displayname.length ? @"present" : @"missing",
+               self.store.userAccountData.count ? @"present" : @"missing");
+
+    // Refresh identity server terms with complete account data
+    [self refreshIdentityServerServiceTerms];
+
+    // Load MXRoomSummaries from the store
+    NSDate *startDate2 = [NSDate date];
+
+    dispatch_group_t dispatchGroupRooms = dispatch_group_create();
+    NSUInteger numberOfSummaries = self.store.roomSummaryStore.countOfRooms;
+    taskProfile.units = numberOfSummaries;
+    NSArray<NSString *> *roomIDs = self.store.roomIds;
+    BOOL fixSummariesLastMessages = NO;
+    if (numberOfSummaries < roomIDs.count)
+    {
+        MXLogWarning(@"[MXFileStore] Detected missing rooms, expected: %tu, got: %tu", roomIDs.count, numberOfSummaries);
+
+        fixSummariesLastMessages = YES;
+        //  remove all room summaries
+        [self.store.roomSummaryStore removeAllSummaries];
+
+        //  recreate room summaries
+        for (NSString *roomID in roomIDs)
+        {
+            dispatch_group_enter(dispatchGroupRooms);
+
+            [MXRoomState loadRoomStateFromStore:self.store
+                                     withRoomId:roomID
+                                  matrixSession:self
+                                     onComplete:^(MXRoomState *roomState) {
+                MXRoomSummary *summary = [self getOrCreateRoomSummary:roomID];
+                [self.roomSummaryUpdateDelegate session:self
+                                      updateRoomSummary:summary
+                                        withStateEvents:roomState.stateEvents
+                                              roomState:roomState];
+                [summary save:YES];
+                dispatch_group_leave(dispatchGroupRooms);
+            }];
+        }
+    }
+
+    MXWeakify(self);
+    dispatch_group_notify(dispatchGroupRooms, dispatch_get_main_queue(), ^{
+        MXStrongifyAndReturnIfNil(self);
+
+        NSArray<NSString*> *roomIds = self.store.roomSummaryStore.rooms;
+
+        MXLogDebug(@"[MXSession] Read %lu room ids in %.0fms", (unsigned long)roomIds.count, [[NSDate date] timeIntervalSinceDate:startDate2] * 1000);
+
+        // Fetch and materialise summaries on the store queue. In particular, encrypted
+        // MXRoomLastMessage payloads must not be decrypted or unarchived on the main thread.
+        MXWeakify(self);
+        [self.store.roomSummaryStore fetchAllSummaries:^(NSArray<id<MXRoomSummaryProtocol>> *summaries) {
+            MXStrongifyAndReturnIfNil(self);
+            NSDate *startDate3 = [NSDate date];
+
+            // Pre-warm roomSummaries cache to avoid N per-room store fetches in the loadRoom: step,
+            // then create MXRooms from their states stored in the store.
+            MXWeakify(self);
+            [self mountInMainBatchesWithCount:summaries.count from:0 step:^(NSUInteger index) {
+                id<MXRoomSummaryProtocol> summary = summaries[index];
+                if (self->roomSummaries[summary.roomId] == nil)
+                {
+                    MXRoomSummary *roomSummary = [[MXRoomSummary alloc] initWithSummaryModel:summary];
+                    [roomSummary setMatrixSession:self];
+                    self->roomSummaries[summary.roomId] = roomSummary;
+                }
+            } completion:^{
+                MXStrongifyAndReturnIfNil(self);
+                MXWeakify(self);
+                [self mountInMainBatchesWithCount:roomIds.count from:0 step:^(NSUInteger index) {
+                    [self loadRoom:roomIds[index]];
+                } completion:^{
+                    MXStrongifyAndReturnIfNil(self);
+                    MXLogDebug(@"[MXSession] Built %lu MXRooms in %.0fms", (unsigned long)self->rooms.count, [[NSDate date] timeIntervalSinceDate:startDate3] * 1000);
+                    // Measures the mount itself; the crypto build runs alongside and is not part of it.
+                    taskProfile.units = self->rooms.count;
+                    [MXSDKOptions.sharedInstance.profiler stopMeasuringTaskWithProfile:taskProfile];
+                    completion(fixSummariesLastMessages);
+                }];
+            }];
+        }];
+    });
+}
+
+/// Runs `step` for indexes [from, count) on the main thread, `kMXSessionMountBatchSize` per runloop
+/// pass. Building every summary and MXRoom in one pass held the main thread for the whole account at
+/// launch (first frame, touches); between batches the runloop can draw and handle input. The caller
+/// sets StoreDataReady only from `completion`, so clients of that state always see complete `rooms`.
+/// Stops without calling `completion` if the session is closed meanwhile.
+- (void)mountInMainBatchesWithCount:(NSUInteger)count
+                               from:(NSUInteger)from
+                               step:(void (^)(NSUInteger index))step
+                         completion:(dispatch_block_t)completion
+{
+    NSUInteger end = MIN(from + kMXSessionMountBatchSize, count);
+    for (NSUInteger index = from; index < end; index++)
+    {
+        step(index);
+    }
+
+    if (end >= count)
+    {
+        completion();
+        return;
+    }
+
+    MXWeakify(self);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        MXStrongifyAndReturnIfNil(self);
+        if (!self->matrixRestClient)
+        {
+            return;
+        }
+        [self mountInMainBatchesWithCount:count from:end step:step completion:completion];
+    });
 }
 
 - (void)initializeCryptoWithProgress:(void (^)(double))progress
