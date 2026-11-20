@@ -54,6 +54,13 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
     
     private var hasReachedHomeServerBackwardsPaginationEnd: Bool = false
     private var hasReachedHomeServerForwardsPaginationEnd: Bool = false
+
+    /// Лента треда на дырах (ADR-0022): страницы треда из стора по `ord`, недостающее — `/relations` от trsc.count.
+    private var timelineStore: MXTimelineStore? { store as? MXTimelineStore }
+    /// `ord` самого старого отданного события треда; nil — ещё ничего не отдано.
+    private var threadCursor: Int64?
+    /// Отдан корень: старше в треде ничего нет.
+    private var threadReachedRoot = false
     
     /// The current pending request
     private var currentHttpOperation: MXHTTPOperation?
@@ -70,7 +77,10 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
             fatalError("[MXThreadEventTimeline] Initializer: Session must be provided")
         }
         let store: MXStore
-        if initialEventId != nil {
+        if initialEventId != nil, session.store is MXTimelineStore {
+            // Окно треда живёт в общем сторе, как и окно прыжка в комнате.
+            store = session.store
+        } else if initialEventId != nil {
             store = MXMemoryStore()
             store.open(with: session.credentials, onComplete: nil, failure: nil)
         } else {
@@ -113,6 +123,9 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
     }
     
     public func canPaginate(_ direction: MXTimelineDirection) -> Bool {
+        if timelineStore != nil {
+            return direction == .backwards ? !threadReachedRoot : false
+        }
         switch direction {
         case .backwards:
             // canPaginate depends on two things:
@@ -132,6 +145,11 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
     }
     
     public func resetPagination() {
+        if timelineStore != nil {
+            threadCursor = nil
+            threadReachedRoot = false
+            return
+        }
         // Reset store pagination
         storeMessagesEnumerator = store.messagesEnumerator(forRoom: thread.roomId)
 
@@ -149,8 +167,11 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
         }
         
         // Reset the store
-        if !store.isPermanent {
+        if !store.isPermanent && timelineStore == nil {
             store.deleteAllData()
+        }
+        if timelineStore != nil {
+            resetPagination()
         }
         
         backwardsPaginationToken = nil
@@ -216,6 +237,16 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
         assert(!(isLiveTimeline && direction == .forwards), "[MXThreadEventTimeline][\(timelineId)] Cannot paginate forwards on a live timeline")
         
         let operation = MXHTTPOperation()
+        if let timelineStore = timelineStore {
+            if direction == .forwards {
+                // Окно треда строится назад от новых ответов до искомого: вперёд догружать нечего.
+                DispatchQueue.main.async { complete() }
+                return operation
+            }
+            holesStep(store: timelineStore, remaining: Int(numItems), onlyFromStore: onlyFromStore, allowServer: true,
+                      operation: operation, complete: complete, failure: failure)
+            return operation
+        }
         
         paginateFromStore(numberOfItems: numItems, direction: direction) { [weak self] eventsFromStore in
             guard let self = self else { return }
@@ -381,6 +412,132 @@ public class MXThreadEventTimeline: NSObject, MXEventTimeline {
         return copy
     }
     
+    //  MARK: - Timeline store (ADR-0022)
+
+    /// Ниже этой позиции ответы треда в сторе могут быть неполными: под самой верхней дырой основной ленты синк
+    /// не приносил событий, а значит и ответов треда. Выше — лента непрерывна до живого края. Догрузка `/relations`
+    /// опускает границу (`MXThread.storeCoverageFloor`), до корня — снимает её совсем.
+    private func trustedFloor(store: MXTimelineStore) -> Int64 {
+        var floor = Int64.min
+        for hole in store.holes(inRoom: thread.roomId, thread: nil) where !hole.isOpenEnded {
+            floor = max(floor, hole.upperOrder)
+        }
+        if let covered = thread.storeCoverageFloor {
+            floor = min(floor, covered)
+        }
+        return floor
+    }
+
+    /// Страница треда из стора от курсора: только события, которым можно верить (непрерывные с живым краем или
+    /// подтверждённые `/relations`). Обрезается на первом событии ниже границы.
+    private func trustedPage(store: MXTimelineStore, limit: Int) -> [MXEvent] {
+        let page: MXStorePage
+        if let cursor = threadCursor {
+            page = store.page(inRoom: thread.roomId, thread: thread.id, beforeOrder: cursor, limit: UInt(limit), types: nil)
+        } else {
+            page = store.latestPage(inRoom: thread.roomId, thread: thread.id, limit: UInt(limit), types: nil)
+        }
+        let floor = trustedFloor(store: store)
+        var trusted: [MXEvent] = []
+        for event in page.events.reversed() {
+            guard event.hasTrscOrder, event.trscOrder >= floor else { break }
+            trusted.append(event)
+        }
+        return trusted.reversed()
+    }
+
+    private func holesStep(store: MXTimelineStore,
+                           remaining: Int,
+                           onlyFromStore: Bool,
+                           allowServer: Bool,
+                           operation: MXHTTPOperation,
+                           complete: @escaping () -> Void,
+                           failure: @escaping (Error) -> Void) {
+        if threadReachedRoot {
+            DispatchQueue.main.async { complete() }
+            return
+        }
+        let events = trustedPage(store: store, limit: remaining)
+        decryptEvents(events) { [weak self] in
+            guard let self = self, !operation.isCancelled else { return }
+            for event in events.reversed() {
+                self.notifyListeners(event, direction: .backwards)
+            }
+            if let oldest = events.first, oldest.hasTrscOrder {
+                self.threadCursor = oldest.trscOrder
+            }
+            if events.contains(where: { $0.eventId == self.thread.id }) {
+                self.threadReachedRoot = true
+                self.hasReachedHomeServerBackwardsPaginationEnd = true
+            }
+            let left = remaining - events.count
+            guard left > 0, !onlyFromStore, allowServer, !self.threadReachedRoot,
+                  let restClient = self.thread.session?.matrixRestClient else {
+                DispatchQueue.main.async { complete() }
+                return
+            }
+            let from = self.threadCursor.map { String($0) }
+            MXLog.debug("[MXThreadEventTimeline][\(self.timelineId)] holes: request \(left) replies from \(from ?? "the newest")")
+            let request = restClient.relations(forEvent: self.thread.id,
+                                               inRoom: self.thread.roomId,
+                                               relationType: MXEventRelationTypeThread,
+                                               eventType: nil,
+                                               from: from,
+                                               direction: .backwards,
+                                               limit: UInt(left)) { [weak self] response in
+                guard let self = self, !operation.isCancelled else { return }
+                switch response {
+                case .success(let relations):
+                    self.storeRelations(relations, from: from, store: store) {
+                        self.holesStep(store: store, remaining: left, onlyFromStore: true, allowServer: false,
+                                       operation: operation, complete: complete, failure: failure)
+                    }
+                case .failure(let error):
+                    failure(error)
+                }
+            }
+            if let limit = self.paginationMaxNumberOfTries {
+                request.maxNumberOfTries = min(request.maxNumberOfTries, limit.uintValue)
+            }
+            operation.mutate(to: request)
+        }
+    }
+
+    /// Ответ `/relations` — в стор как страница в дыру треда `(начало, курсор)`; граница доверия опускается
+    /// до самого старого ответа, а без `next_batch` — до корня.
+    private func storeRelations(_ relations: MXAggregationPaginatedResponse, from: String?, store: MXTimelineStore,
+                                completion: @escaping () -> Void) {
+        var chunk = relations.chunk
+        if relations.nextBatch == nil, let root = relations.originalEvent {
+            chunk.append(root)
+        }
+        fixRoomId(inEvents: chunk)
+        decryptEvents(chunk) { [weak self] in
+            guard let self = self else { return }
+            let hole = MXRoomHole(roomId: self.thread.roomId,
+                                  threadId: self.thread.id,
+                                  lowerOrder: MXRoomHoleOpenStart,
+                                  upperOrder: self.threadCursor ?? MXRoomHoleOpenEnd,
+                                  backwardToken: from,
+                                  forwardToken: nil,
+                                  retryBlocked: false)
+            let page = MXPaginationResponse()
+            page.chunk = chunk
+            page.state = []
+            page.start = from
+            page.end = relations.nextBatch
+            store.applyPage(page, to: hole, direction: .backwards)
+            store.commit?()
+            let oldest = chunk.filter { $0.hasTrscOrder }.map { $0.trscOrder }.min()
+            let floor = relations.nextBatch == nil ? Int64.min : (oldest ?? self.threadCursor ?? Int64.max)
+            self.thread.storeCoverageFloor = min(self.thread.storeCoverageFloor ?? Int64.max, floor)
+            for event in relations.chunk {
+                self.thread.session?.threadingService.handleEvent(event, direction: .backwards, completion: nil)
+            }
+            completion()
+        }
+    }
+
     //  MARK: - Private
     
     private func processPaginationResponse(_ response: MXAggregationPaginatedResponse, direction: MXTimelineDirection) {

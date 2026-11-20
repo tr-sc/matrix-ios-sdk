@@ -32,6 +32,7 @@
 #import "MXEventsEnumeratorOnArray.h"
 
 #import "MXRoomSync.h"
+#import "MXTimelineStore.h"
 #import "MatrixSDKSwiftHeader.h"
 
 // Используется копиями лент совместно, но не продлевает время жизни сессии или хранилища.
@@ -93,6 +94,16 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     NSMutableSet<NSString *> *deliveredContextRootIds;
     NSSet<NSString *> *restoreAllowedContextRootIds;
     BOOL restoringHistoryContext;
+
+    // Лента на дырах (ADR-0022): не nil, если стор сессии — MXTimelineStore. Тогда события читаются страницами
+    // по `ord`, дыра догружается с сервера от trsc.count её границы, окно прыжка живёт в том же сторе.
+    id<MXTimelineStore> timelineStore;
+    // `ord` самого старого отданного события; MXRoomHoleOpenEnd — ещё ничего не отдано (первая страница — latestPage).
+    int64_t backwardCursor;
+    // `ord` самого нового отданного события у ленты прыжка.
+    int64_t forwardCursor;
+    BOOL backwardReachedStart;
+    BOOL forwardReachedLive;
 }
 
 - (BOOL)preservesHistoryGaps;
@@ -134,7 +145,13 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 - (instancetype)initWithRoom:(MXRoom*)theRoom andInitialEventId:(NSString*)initialEventId
 {
     // Is it a past or live timeline?
-    if (initialEventId)
+    if (initialEventId && [theRoom.mxSession.store conformsToProtocol:@protocol(MXTimelineStore)])
+    {
+        // Окно прыжка — обычный диапазон между дырами общего стора: его события остаются в базе,
+        // и догрузка вперёд срастается с живой лентой без отдельной модели контекстов.
+        self = [self initWithRoom:theRoom initialEventId:initialEventId andStore:theRoom.mxSession.store];
+    }
+    else if (initialEventId)
     {
         // Events for a past timeline are stored in memory
         MXMemoryStore *memoryStore = [[MXMemoryStore alloc] init];
@@ -157,6 +174,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         _initialEventId = initialEventId;
         room = theRoom;
         store = theStore;
+        if ([theStore conformsToProtocol:@protocol(MXTimelineStore)]) timelineStore = (id<MXTimelineStore>)theStore;
+        backwardCursor = MXRoomHoleOpenEnd;
+        forwardCursor = MXRoomHoleOpenStart;
         [self observeRoomHistoryFlush];
 
         if (!initialEventId)
@@ -191,7 +211,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         httpOperation = nil;
     }
     
-    if (!_isLiveTimeline && !store.isPermanent)
+    if (!_isLiveTimeline && !store.isPermanent && !timelineStore)
     {
         // Release past timeline events stored in memory
         [store deleteAllData];
@@ -206,7 +226,8 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 - (void)observeRoomHistoryFlush
 {
     // Past timelines with their own memory store are independent of live sync.
-    if (!room || store != room.mxSession.store) return;
+    // Стор с дырами историю не сбрасывает: курсоры ленты остаются верными, отменять нечего.
+    if (!room || store != room.mxSession.store || timelineStore) return;
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(roomHistoryDidFlush:)
                                                  name:kMXRoomDidFlushDataNotification
@@ -265,6 +286,12 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
 - (BOOL)canPaginate:(MXTimelineDirection)direction
 {
+    if (timelineStore)
+    {
+        if (direction == MXTimelineDirectionBackwards) return !backwardReachedStart;
+        return !_isLiveTimeline && !forwardReachedLive;
+    }
+
     BOOL canPaginate = NO;
     MXRoomHistoryContext *component = self.historyContextComponent;
     for (MXRoomHistoryContext *root in component.replayRoots) {
@@ -312,6 +339,14 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     // Reset the back state to the current room state
     backState = [[MXRoomState alloc] initBackStateWith:_state];
 
+    if (timelineStore)
+    {
+        // Курсор вместо перечислителя по всему чату: первая страница — самые новые события до дыры.
+        backwardCursor = MXRoomHoleOpenEnd;
+        backwardReachedStart = NO;
+        return;
+    }
+
     // Reset store pagination
     storeMessagesEnumerator = [store messagesEnumeratorForRoom:_state.roomId];
 }
@@ -321,6 +356,11 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     NSParameterAssert(success);
     NSAssert(_initialEventId, @"[MXRoomEventTimeline] resetPaginationAroundInitialEventWithLimit cannot be called on live timeline");
     
+    if (timelineStore)
+    {
+        return [self holesResetAroundInitialEventWithLimit:limit success:success failure:failure];
+    }
+
     if (!MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps)
     {
         // Flag off: the stock context load (no wrapper operation, no history context bookkeeping).
@@ -589,6 +629,11 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
 - (MXHTTPOperation *)paginate:(NSUInteger)numItems direction:(MXTimelineDirection)direction onlyFromStore:(BOOL)onlyFromStore complete:(void (^)(void))complete failure:(void (^)(NSError *))failure
 {
+    if (timelineStore)
+    {
+        return [self holesPaginate:numItems direction:direction onlyFromStore:onlyFromStore complete:complete failure:failure];
+    }
+
     MXHTTPOperation *operation = [MXHTTPOperation new];
     [paginationOperations addObject:operation];
 
@@ -877,6 +922,16 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     MXWeakify(self);
     [self decryptEvents:roomSync.timeline.events ifNewerThanTimestamp:timestamp onComplete:^{
         MXStrongifyAndReturnIfNil(self);
+
+        if (self->timelineStore)
+        {
+            // До записи событий пачки: стор сам решает, сомкнулась ли она с живым краем или оставила дыру
+            // `(живой край, первое событие)` — вместо удаления истории комнаты на limited-синке.
+            [self->timelineStore noteSyncTimelineInRoom:self.state.roomId
+                                             firstEvent:roomSync.timeline.events.firstObject
+                                                limited:roomSync.timeline.limited
+                                              prevBatch:roomSync.timeline.prevBatch];
+        }
         
         BOOL preserve = isSlidingSync && [self preservesHistoryGaps];
         MXEvent *olderAnchor = preserve ? [self->store messagesEnumeratorForRoom:self.state.roomId].nextEvent : nil;
@@ -912,7 +967,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         else
         {
             // Check whether some events have not been received from server.
-            if (!preserve && !isPaginationInitialSync && roomSync.timeline.limited)
+            if (!self->timelineStore && !preserve && !isPaginationInitialSync && roomSync.timeline.limited)
             {
                 // Flush the existing messages for this room by keeping state events.
                 [self->store deleteAllMessagesInRoom:self.state.roomId];
@@ -1378,7 +1433,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
         // Update summary with this state events update
         // Only the history feature keeps non-live (context) timelines from touching the summary.
-        BOOL updatesRoom = !_initialEventId || !MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps;
+        BOOL updatesRoom = !_initialEventId || (!timelineStore && !MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps);
         if (updatesRoom) [room.summary handleStateEvents:stateEvents];
 
         // Update room account data with this state events update
@@ -1526,6 +1581,8 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 #pragma mark - Durable disconnected history
 - (BOOL)preservesHistoryGaps
 {
+    // Дыры стора заменяют прежнюю машину gaps и контекстов целиком.
+    if (timelineStore) return NO;
     MXPrepareHistoryRegistries();
     NSNumber *sliding = [MXHistoryModes objectForKey:store][room.roomId];
     return MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
@@ -1541,6 +1598,10 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
 - (MXHTTPOperation *)paginateHistoryGap:(NSString *)gapId success:(void (^)(NSArray<MXEvent *> *))success failure:(void (^)(NSError *))failure
 {
+    if (timelineStore)
+    {
+        return [self holesPaginateHistoryGap:gapId success:success failure:failure];
+    }
     MXHTTPOperation *operation = [MXHTTPOperation new];
     [paginationOperations addObject:operation];
     MXRoomHistoryGap *gap;
@@ -1668,6 +1729,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 {
     MXPrepareHistoryRegistries();
     id<MXStore> liveStore = room.mxSession.store;
+    if ([liveStore conformsToProtocol:@protocol(MXTimelineStore)]) return NO;
     NSNumber *sliding = [MXHistoryModes objectForKey:liveStore][room.roomId];
     return liveStore && MXSDKOptions.sharedInstance.preserveHistoryOnSlidingSyncGaps
         && (!sliding || sliding.boolValue);
@@ -1984,6 +2046,327 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     return saved.backwardConnected || saved.forwardConnected;
 }
 
+#pragma mark - Timeline store (ADR-0022)
+
+static NSError *MXRoomEventTimelineCancelledError(void)
+{
+    return [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCancelled userInfo:nil];
+}
+
+- (BOOL)holesOrderOfEvent:(MXEvent *)event order:(int64_t *)order
+{
+    if (event.eventId.length && [timelineStore orderOfEvent:event.eventId inRoom:_state.roomId order:order]) return YES;
+    return NO;
+}
+
+/// Страница из стора от курсора в сторону пагинации. Не склеивает события через дыру.
+- (MXStorePage *)holesReadPage:(NSUInteger)limit direction:(MXTimelineDirection)direction
+{
+    NSString *roomId = _state.roomId;
+    if (direction == MXTimelineDirectionBackwards)
+    {
+        if (backwardCursor == MXRoomHoleOpenEnd)
+        {
+            return [timelineStore latestPageInRoom:roomId thread:nil limit:limit types:nil];
+        }
+        return [timelineStore pageInRoom:roomId thread:nil beforeOrder:backwardCursor limit:limit types:nil];
+    }
+    return [timelineStore pageInRoom:roomId thread:nil afterOrder:forwardCursor limit:limit types:nil];
+}
+
+/// Сдвинуть курсор за отданные события и запомнить, что дальше ничего нет.
+- (void)holesAdvanceWithPage:(MXStorePage *)page direction:(MXTimelineDirection)direction
+{
+    int64_t order;
+    if (direction == MXTimelineDirectionBackwards)
+    {
+        if ([self holesOrderOfEvent:page.events.firstObject order:&order]) backwardCursor = order;
+        // Ниже страницы ни событий, ни дыры: загружено начало истории (или комната пуста).
+        if (!page.holeBefore && (page.reachedRoomStart || !page.events.count)) backwardReachedStart = YES;
+    }
+    else
+    {
+        if ([self holesOrderOfEvent:page.events.lastObject order:&order]) forwardCursor = order;
+        if (!page.holeAfter && (page.reachedLiveEdge || !page.events.count)) forwardReachedLive = YES;
+    }
+}
+
+- (void)holesDeliver:(NSArray<MXEvent *> *)events direction:(MXTimelineDirection)direction
+{
+    // События страницы по возрастанию; назад слушатели получают их от новых к старым, как раньше.
+    NSEnumerator *enumerator = direction == MXTimelineDirectionBackwards ? events.reverseObjectEnumerator : events.objectEnumerator;
+    for (MXEvent *event in enumerator)
+    {
+        [self addEvent:event direction:direction fromStore:YES isRoomInitialSync:NO];
+    }
+}
+
+- (MXHTTPOperation *)holesPaginate:(NSUInteger)numItems direction:(MXTimelineDirection)direction onlyFromStore:(BOOL)onlyFromStore
+                          complete:(void (^)(void))complete failure:(void (^)(NSError *))failure
+{
+    NSAssert(!(_isLiveTimeline && direction == MXTimelineDirectionForwards), @"Cannot paginate forwards on a live timeline");
+    MXHTTPOperation *operation = [MXHTTPOperation new];
+    [paginationOperations addObject:operation];
+    if (!backState) backState = [[MXRoomState alloc] initBackStateWith:_state];
+
+    __block BOOL finished = NO;
+    __weak NSHashTable *operations = paginationOperations;
+    void (^finish)(NSError *) = ^(NSError *error) {
+        if (finished) return;
+        finished = YES;
+        [operations removeObject:operation];
+        if (error) { if (failure) failure(error); }
+        else if (complete) complete();
+    };
+    [self holesStep:numItems direction:direction onlyFromStore:onlyFromStore allowServer:YES operation:operation finish:finish];
+    return operation;
+}
+
+/// Один шаг: страница из стора; если её не хватило и упёрлись в дыру — один запрос в дыру и повтор чтения.
+/// Больше одного запроса за вызов не делаем: вызывающий получает события сразу и просит следующую страницу сам.
+- (void)holesStep:(NSUInteger)remaining direction:(MXTimelineDirection)direction onlyFromStore:(BOOL)onlyFromStore
+      allowServer:(BOOL)allowServer operation:(MXHTTPOperation *)operation finish:(void (^)(NSError *))finish
+{
+    BOOL backwards = direction == MXTimelineDirectionBackwards;
+    if (backwards ? backwardReachedStart : forwardReachedLive)
+    {
+        dispatch_async(dispatch_get_main_queue(), ^{ finish(operation.isCancelled ? MXRoomEventTimelineCancelledError() : nil); });
+        return;
+    }
+    MXStorePage *page = [self holesReadPage:remaining direction:direction];
+    NSArray<MXEvent *> *events = page.events;
+    MXWeakify(self);
+    [self decryptEvents:events onComplete:^{
+        MXStrongifyAndReturnIfNil(self);
+        if (operation.isCancelled) { finish(MXRoomEventTimelineCancelledError()); return; }
+        [self holesDeliver:events direction:direction];
+        [self holesAdvanceWithPage:page direction:direction];
+        MXLogDebug(@"[MXRoomEventTimeline] holes: %tu events from the store in %@ (%@)", events.count, self.state.roomId,
+                   backwards ? @"backwards" : @"forwards");
+
+        NSUInteger left = remaining > events.count ? remaining - events.count : 0;
+        MXRoomHole *hole = backwards ? page.holeBefore : page.holeAfter;
+        if (!left || onlyFromStore || !allowServer || !hole)
+        {
+            dispatch_async(dispatch_get_main_queue(), ^{ finish(operation.isCancelled ? MXRoomEventTimelineCancelledError() : nil); });
+            return;
+        }
+        if (hole.retryBlocked)
+        {
+            finish([NSError errorWithDomain:@"MXRoomHole" code:1 userInfo:@{NSLocalizedDescriptionKey: @"History hole is waiting before the next attempt"}]);
+            return;
+        }
+        [self holesFill:hole limit:left direction:direction operation:operation finish:finish then:^{
+            [self holesStep:left direction:direction onlyFromStore:YES allowServer:NO operation:operation finish:finish];
+        }];
+    }];
+}
+
+/// `/messages` от trsc.count границы дыры → applyPage → коммит.
+- (void)holesFill:(MXRoomHole *)hole limit:(NSUInteger)limit direction:(MXTimelineDirection)direction
+        operation:(MXHTTPOperation *)operation finish:(void (^)(NSError *))finish then:(dispatch_block_t)next
+{
+    BOOL backwards = direction == MXTimelineDirectionBackwards;
+    NSString *roomId = _state.roomId;
+    NSString *token = backwards ? hole.backwardToken : hole.forwardToken;
+    if (!token.length && backwards) token = [store paginationTokenOfRoom:roomId];
+    if (!token.length)
+    {
+        finish([NSError errorWithDomain:@"MXRoomHole" code:2 userInfo:@{NSLocalizedDescriptionKey: @"History hole has no pagination token"}]);
+        return;
+    }
+    __weak MXSession *session = room.mxSession;
+    MXWeakify(self);
+    MXHTTPOperation *request = [session.matrixRestClient messagesForRoom:roomId from:token direction:direction limit:limit filter:_roomEventFilter success:^(MXPaginationResponse *response) {
+        MXStrongifyAndReturnIfNil(self);
+        if (operation.isCancelled) { finish(MXRoomEventTimelineCancelledError()); return; }
+        if (!session || (![session hasRoomWithRoomId:roomId] && ![session isPeekingInRoomWithRoomId:roomId]))
+        {
+            finish(nil);
+            return;
+        }
+        MXLogDebug(@"[MXRoomEventTimeline] holes: %tu events from the server into hole %@", response.chunk.count, hole.holeId);
+        [self fixRoomIdInEvents:response.chunk];
+        [self decryptEvents:response.chunk onComplete:^{
+            MXStrongifyAndReturnIfNil(self);
+            if (operation.isCancelled) { finish(MXRoomEventTimelineCancelledError()); return; }
+            // Lazy loading: участники страницы, которых не знает текущее состояние ленты.
+            if (response.state.count)
+            {
+                NSMutableArray<MXEvent *> *members = [NSMutableArray array];
+                for (MXEvent *stateEvent in response.state)
+                {
+                    if (stateEvent.eventType == MXEventTypeRoomMember && ![self->_state.members memberWithUserId:stateEvent.stateKey])
+                    {
+                        [members addObject:stateEvent];
+                    }
+                }
+                if (members.count) [self handleStateEvents:members direction:MXTimelineDirectionForwards];
+                [self handleStateEvents:response.state direction:direction];
+            }
+            [self->timelineStore applyPage:response toHole:hole direction:direction];
+            [self->store commit];
+            next();
+        }];
+    } failure:^(NSError *error) {
+        finish(error);
+    }];
+    if (self.paginationMaxNumberOfTries)
+    {
+        request.maxNumberOfTries = MIN(request.maxNumberOfTries, self.paginationMaxNumberOfTries.unsignedIntegerValue);
+        request.maxTotalAttempts = self.paginationMaxNumberOfTries;
+    }
+    [operation mutateTo:request];
+}
+
+/// Прокладка для экрана чата, который ещё работает с MXRoomHistoryGap (iP10 переведёт его на MXRoomHole):
+/// id разрыва — это holeId дыры (см. historyGapsForRoom: у MXSQLiteStore). Одна страница в дыру через applyPage;
+/// success получает новые события страницы от новых к старым, как прежняя реализация.
+- (MXHTTPOperation *)holesPaginateHistoryGap:(NSString *)gapId success:(void (^)(NSArray<MXEvent *> *))success failure:(void (^)(NSError *))failure
+{
+    MXHTTPOperation *operation = [MXHTTPOperation new];
+    [paginationOperations addObject:operation];
+    MXRoomHole *hole;
+    for (MXRoomHole *candidate in [timelineStore holesInRoom:room.roomId thread:nil])
+    {
+        if ([candidate.holeId isEqualToString:gapId]) { hole = candidate; break; }
+    }
+    __weak NSHashTable *operations = paginationOperations;
+    void (^finish)(NSError *) = ^(NSError *error) {
+        [operations removeObject:operation];
+        if (error) failure(error);
+    };
+    if (!hole)
+    {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            finish([NSError errorWithDomain:@"MXRoomHistoryGap" code:1 userInfo:@{NSLocalizedDescriptionKey: @"History interval has no usable cursor"}]);
+        });
+        return operation;
+    }
+    MXWeakify(self);
+    void (^captureNew)(void) = ^{
+        MXStrongifyAndReturnIfNil(self);
+        // Новые события дыры — те, что лежат теперь между её прежними границами (внутри дыры событий не было).
+        MXStorePage *page = [self->timelineStore pageInRoom:self->room.roomId thread:nil beforeOrder:hole.upperOrder limit:50 types:nil];
+        NSMutableArray<MXEvent *> *delivered = [NSMutableArray array];
+        for (MXEvent *event in page.events.reverseObjectEnumerator)
+        {
+            int64_t order;
+            if (![self holesOrderOfEvent:event order:&order] || order <= hole.lowerOrder) break;
+            if (event.eventType == MXEventTypeRoomRedaction) [self handleRedaction:event lookupUnknownTarget:NO];
+            [self addEvent:event direction:MXTimelineDirectionBackwards fromStore:YES isRoomInitialSync:NO];
+            [delivered addObject:event];
+        }
+        [self notifyHistoryGapChange];
+        [operations removeObject:operation];
+        success(delivered);
+    };
+    [self holesFill:hole limit:50 direction:MXTimelineDirectionBackwards operation:operation finish:finish then:captureNew];
+    return operation;
+}
+
+/// resetPagination отменяет все операции ленты — кроме той, что сама его вызывает.
+- (void)holesResetPaginationKeeping:(MXHTTPOperation *)operation
+{
+    [paginationOperations removeObject:operation];
+    [self resetPagination];
+    [paginationOperations addObject:operation];
+}
+
+/// Прыжок к событию. Есть в базе — окно из стора без сети; нет — `/context` кладёт окно в стор между дырами.
+- (MXHTTPOperation *)holesResetAroundInitialEventWithLimit:(NSUInteger)limit success:(void (^)(void))success failure:(void (^)(NSError *))failure
+{
+    [self cancelPendingPaginations];
+    MXHTTPOperation *operation = [MXHTTPOperation new];
+    [paginationOperations addObject:operation];
+    NSString *roomId = room.roomId;
+    NSString *targetId = _initialEventId;
+    forwardsPaginationToken = nil;
+    hasReachedHomeServerForwardsPaginationEnd = NO;
+
+    MXStorePage *stored = [timelineStore pageAroundEvent:targetId inRoom:roomId limit:limit];
+    MXWeakify(self);
+    if (stored)
+    {
+        // Исторического состояния в сторе нет: берём текущее состояние комнаты, как и для ленты из стора.
+        [room state:^(MXRoomState *roomState) {
+            MXStrongifyAndReturnIfNil(self);
+            if (operation.isCancelled) return;
+            self->_state = [roomState copy];
+            [self holesResetPaginationKeeping:operation];
+            [self holesShowWindow:stored.events target:targetId page:stored onComplete:^{
+                if (!operation.isCancelled) success();
+            }];
+        }];
+        return operation;
+    }
+
+    MXHTTPOperation *request = [room.mxSession.matrixRestClient contextOfEvent:targetId inRoom:roomId limit:limit filter:_roomEventFilter success:^(MXEventContext *eventContext) {
+        MXStrongifyAndReturnIfNil(self);
+        if (operation.isCancelled) return;
+        NSMutableArray<MXEvent *> *events = [NSMutableArray array];
+        [events addObjectsFromArray:eventContext.eventsBefore.reverseObjectEnumerator.allObjects ?: @[]];
+        if (eventContext.event) [events addObject:eventContext.event];
+        [events addObjectsFromArray:eventContext.eventsAfter ?: @[]];
+        [self fixRoomIdInEvents:events];
+        [self initialiseState:eventContext.state];
+        [self holesResetPaginationKeeping:operation];
+        [self decryptEvents:events onComplete:^{
+            MXStrongifyAndReturnIfNil(self);
+            if (operation.isCancelled) return;
+            [self->timelineStore insertContext:eventContext inRoom:roomId];
+            [self->store commit];
+            // Версии из стора: редакция, пришедшая раньше цели, уже применена.
+            NSMutableArray<MXEvent *> *window = [NSMutableArray arrayWithCapacity:events.count];
+            for (MXEvent *event in events)
+            {
+                [window addObject:[self->store eventWithEventId:event.eventId inRoom:roomId] ?: event];
+            }
+            [self holesShowWindow:window target:targetId page:nil onComplete:^{
+                if (!operation.isCancelled) success();
+            }];
+        }];
+    } failure:failure];
+    [operation mutateTo:request];
+    return operation;
+}
+
+/// Отдать окно слушателям (цель, затем старше — назад, новее — вперёд) и поставить курсоры по его краям.
+- (void)holesShowWindow:(NSArray<MXEvent *> *)events target:(NSString *)targetId page:(MXStorePage *)page onComplete:(dispatch_block_t)onComplete
+{
+    MXWeakify(self);
+    [self decryptEvents:events onComplete:^{
+        MXStrongifyAndReturnIfNil(self);
+        NSUInteger targetIndex = [events indexOfObjectPassingTest:^BOOL(MXEvent *event, NSUInteger idx, BOOL *stop) {
+            return [event.eventId isEqualToString:targetId];
+        }];
+        int64_t order;
+        self->backwardCursor = MXRoomHoleOpenEnd;
+        self->forwardCursor = MXRoomHoleOpenStart;
+        if ([self holesOrderOfEvent:events.firstObject order:&order]) self->backwardCursor = order;
+        if ([self holesOrderOfEvent:events.lastObject order:&order]) self->forwardCursor = order;
+        self->backwardReachedStart = page && !page.holeBefore && page.reachedRoomStart;
+        self->forwardReachedLive = page && !page.holeAfter && page.reachedLiveEdge;
+        if (targetIndex == NSNotFound)
+        {
+            for (MXEvent *event in events) [self addEvent:event direction:MXTimelineDirectionForwards fromStore:YES isRoomInitialSync:NO];
+        }
+        else
+        {
+            [self addEvent:events[targetIndex] direction:MXTimelineDirectionForwards fromStore:YES isRoomInitialSync:NO];
+            for (NSInteger index = (NSInteger)targetIndex - 1; index >= 0; index--)
+            {
+                [self addEvent:events[index] direction:MXTimelineDirectionBackwards fromStore:YES isRoomInitialSync:NO];
+            }
+            for (NSUInteger index = targetIndex + 1; index < events.count; index++)
+            {
+                [self addEvent:events[index] direction:MXTimelineDirectionForwards fromStore:YES isRoomInitialSync:NO];
+            }
+        }
+        onComplete();
+    }];
+}
+
 #pragma mark - NSCopying
 
 - (nonnull id)copyWithZone:(nullable NSZone *)zone
@@ -1999,6 +2382,10 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
     timeline->_state = [_state copyWithZone:zone];
     timeline->room = room;
     timeline->store = store;
+    timeline->timelineStore = timelineStore;
+    timeline->backwardCursor = MXRoomHoleOpenEnd;
+    timeline->forwardCursor = forwardCursor;
+    timeline->forwardReachedLive = forwardReachedLive;
     [timeline observeRoomHistoryFlush];
     
     // There can be only a single live timeline
