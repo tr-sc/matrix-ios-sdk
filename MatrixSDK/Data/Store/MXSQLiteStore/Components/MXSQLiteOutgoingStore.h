@@ -7,7 +7,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Исходящие и черновики. Заглушка iP1: чтение пустое, запись принимается и забывается. Реализация — пакет iP4.
+/// Исходящие (`outgoing`, строка на local_id) и черновики (`room.draft`). Пакет iP4.
 @interface MXSQLiteOutgoingStore : NSObject <MXSQLiteOutgoingStoring>
 @end
 

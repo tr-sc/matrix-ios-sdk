@@ -34,6 +34,7 @@ FOUNDATION_EXPORT NSString *MatrixSDKVersion;
 #import "MXSQLiteDatabase.h"
 #import "MXSQLiteKeyProvider.h"
 #import "MXSQLiteSchema.h"
+#import "MXSQLiteLegacyImport.h"
 #import "MXRoomEventTimeline.h"
 #import "MXNoStore.h"
 #import "MXMemoryStore.h"

@@ -7,7 +7,13 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Мета сессии (токен синка, well-known, versions…), пользователи, группы, фильтры. Заглушка iP1: чтение пустое, запись принимается и забывается. Реализация — пакет iP3.
+/// Ключ `meta` токена синка (тесты атомарности читают его из базы).
+FOUNDATION_EXPORT NSString *const MXSQLiteMetaKeyEventStreamToken;
+/// Ключ `meta` отметки «перенос из MXFileStore сделан».
+FOUNDATION_EXPORT NSString *const MXSQLiteMetaKeyLegacyImportDone;
+
+/// Мета сессии в таблице `meta` (токен синка — в общей транзакции коммита с событиями, well-known, versions…),
+/// пользователи (`user`), фильтры (`filter`). Группы — только в памяти (из Matrix удалены). Пакет iP3.
 @interface MXSQLiteMetaStore : NSObject <MXSQLiteMetaStoring>
 @end
 
