@@ -7,7 +7,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Квитанции и отметка «непрочитано». Заглушка iP1: чтение пустое, запись принимается и забывается. Реализация — пакет iP4.
+/// Квитанции (`receipt`, строка на комнату + тред + пользователя) и отметка «непрочитано» (`room.marked_unread`). Пакет iP4.
 @interface MXSQLiteReceiptStore : NSObject <MXSQLiteReceiptStoring>
 @end
 

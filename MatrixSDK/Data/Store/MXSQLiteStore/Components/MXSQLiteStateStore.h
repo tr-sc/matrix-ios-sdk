@@ -7,7 +7,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Состояние комнаты, room account data, флаги пагинации и участников. Заглушка iP1: чтение пустое, запись принимается и забывается. Реализация — пакет iP3.
+/// Состояние комнаты (`room_state`, пишется только разница с прошлым), room account data, флаги пагинации и
+/// участников (колонки `room`). Пакет iP3.
 @interface MXSQLiteStateStore : NSObject <MXSQLiteStateStoring>
 @end
 

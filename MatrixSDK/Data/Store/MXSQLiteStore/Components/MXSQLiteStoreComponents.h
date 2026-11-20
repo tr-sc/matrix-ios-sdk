@@ -120,6 +120,9 @@
 @property (nonatomic, readonly) MXAuthMetadata * _Nullable authMetadata;
 @property (nonatomic, readonly) NSInteger maxUploadSize;
 
+/// Одноразовый перенос черновиков и исходящих из MXFileStore уже сделан (`MXSQLiteLegacyImport`).
+@property (nonatomic) BOOL legacyFileStoreImported;
+
 - (void)storeHomeserverWellknown:(nonnull MXWellKnown*)homeserverWellknown;
 - (void)storeHomeserverCapabilities:(nonnull MXCapabilities*)homeserverCapabilities;
 - (void)storeSupportedMatrixVersions:(nonnull MXMatrixVersions*)supportedMatrixVersions;

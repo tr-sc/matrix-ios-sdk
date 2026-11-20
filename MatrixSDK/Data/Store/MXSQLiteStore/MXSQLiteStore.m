@@ -500,9 +500,15 @@ static NSString *gKeychainAccessGroup;
             return NO;
         }
     }
-    return [connection run:@"DELETE FROM room WHERE rid = ?1"
-                      bind:^(MXSQLiteStatement *statement) { [statement bindInt64:rid.longLongValue at:1]; }
-                     error:error];
+    if (![connection run:@"DELETE FROM room WHERE rid = ?1"
+                    bind:^(MXSQLiteStatement *statement) { [statement bindInt64:rid.longLongValue at:1]; }
+                   error:error])
+    {
+        return NO;
+    }
+    // Иначе запись в эту комнату в той же транзакции возьмёт из кеша rid удалённой строки `room`.
+    [self.rooms forgetRoomId:roomId];
+    return YES;
 }
 
 - (void)finishParts:(NSArray<NSArray *> *)parts deletions:(NSArray<NSString *> *)deletions committed:(BOOL)committed
