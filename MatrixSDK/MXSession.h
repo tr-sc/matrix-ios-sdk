@@ -39,6 +39,7 @@
 #import "MX3PidAddManager.h"
 #import "MXMembershipTransitionState.h"
 #import "MXRoomAccountDataUpdating.h"
+#import "MXTrscSyncNetWatch.h"
 
 /**
  `MXSessionState` represents the states in the life cycle of a MXSession instance.
@@ -168,6 +169,14 @@ FOUNDATION_EXPORT NSString *const kMXSessionDidLeaveRoomNotification;
  - `kMXSessionNotificationErrorKey` the error if any.
  */
 FOUNDATION_EXPORT NSString *const kMXSessionDidSyncNotification;
+
+/**
+ TRSC: posted on the main thread when the session cancelled its sync request in flight and sent a new one
+ with timeout=0 (`trscRestartSyncWithReason:`). The notification object is the session; `userInfo` holds the
+ reason under `kMXSessionTrscSyncRestartReasonKey` (an `MXTrscSyncRestartReason`).
+ */
+FOUNDATION_EXPORT NSString *const kMXSessionTrscSyncRestartNotification;
+FOUNDATION_EXPORT NSString *const kMXSessionTrscSyncRestartReasonKey;
 
 /**
  Posted when MXSession has detected a change in the `invitedRooms` property.
@@ -612,6 +621,27 @@ FOUNDATION_EXPORT NSString *const kMXSessionNoRoomTag;
 
 /** Balance a `subscribeOpenRoomWithRoomId:` call. */
 - (void)unsubscribeOpenRoomWithRoomId:(NSString *)roomId;
+
+/**
+ TRSC (delivery-path.md, B9): rooms the very next Sliding Sync request subscribes to with the open-room
+ timeline limit, e.g. the room of a tapped push before `resume:`. The first answer then carries their recent
+ messages instead of a `limited` one-event timeline that needs `/messages`.
+
+ The rooms stay in the requests until an answer to one of them is handled. When a request is already in
+ flight in a running session, it is restarted at once so the subscription does not wait for the long-poll.
+ No-op with the legacy /sync.
+ */
+- (void)trscSubscribeRoomsInNextSyncRequest:(NSArray<NSString *> *)roomIds;
+
+/**
+ TRSC: cancels the sync request in flight and sends a new one with timeout=0 now. The network watch
+ (`MXSDKOptions.trscSyncNetWatchEnabled`) calls it on a network path change and when a long-poll is silent
+ for its server timeout + 10 s; the app may call it with `MXTrscSyncRestartReasonApp`.
+
+ @return NO when there is nothing to restart: no request in flight, a paused, background or closed session,
+         or a legacy /sync request whose caller waits for its result.
+ */
+- (BOOL)trscRestartSyncWithReason:(MXTrscSyncRestartReason)reason;
 
 /**
  TRSC channels: what every Sliding Sync request adds and where it goes (see

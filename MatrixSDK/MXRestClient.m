@@ -4377,10 +4377,19 @@ andUnauthenticatedHandler: (MXRestClientUnauthenticatedHandler)unauthenticatedHa
     NSString *path = @"_matrix/client/unstable/org.matrix.simplified_msc3575/sync";
     if (query.count) path = [path stringByAppendingFormat:@"?%@", [query componentsJoinedByString:@"&"]];
 
+    // TRSC: with the sync network watch on, a long-poll times out at its server timeout + 15 s rather than at
+    // the session default of 60 s; the session's watchdog restarts it at + 10 s already.
+    NSTimeInterval timeoutInSeconds = -1;
+    if (MXSDKOptions.sharedInstance.trscSyncNetWatchEnabled && timeout.unsignedIntegerValue > 0)
+    {
+        timeoutInSeconds = timeout.unsignedIntegerValue / 1000.0 + 15;
+    }
+
     MXWeakify(self);
     MXHTTPOperation *operation = [client requestWithMethod:@"POST"
                                                       path:path
                                                 parameters:body
+                                                   timeout:timeoutInSeconds
                                                    success:^(NSDictionary *JSONResponse) {
         MXStrongifyAndReturnIfNil(self);
         if (!success) return;
