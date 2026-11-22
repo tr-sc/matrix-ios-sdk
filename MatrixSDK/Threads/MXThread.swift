@@ -30,6 +30,10 @@ public class MXThread: NSObject, MXThreadProtocol {
     public let roomId: String
     
     private var liveTimeline: MXEventTimeline?
+
+    /// MXTimelineStore: ответы треда в сторе полны от этой позиции и выше (подтверждено `/relations`).
+    /// `Int64.min` — тред полон до корня. Держится, пока жив объект треда в сервисе.
+    internal var storeCoverageFloor: Int64?
     private var eventsMap: [String: MXEvent] = [:]
     private var liveTimelineOperationQueue: OperationQueue = {
         let queue = OperationQueue()
@@ -201,9 +205,9 @@ public class MXThread: NSObject, MXThreadProtocol {
             return
         }
         
-        notificationCount = store.localUnreadEventCount(roomId, threadId: id, withTypeIn: session.unreadEventTypes)
-        let newEvents = store.newIncomingEvents(inRoom: roomId, threadId: id, withTypeIn: session.unreadEventTypes)
-        let highlightCount = UInt(newEvents.filter { $0.shouldBeHighlighted(inSession: session) }.count)
+        let counts = MXThreadingService.unreadCounts(store: store, session: session, roomId: roomId, threadId: id)
+        notificationCount = counts.notifications
+        let highlightCount = counts.highlights
         if highlightCount > 0 {
             self.highlightCount = highlightCount
         }

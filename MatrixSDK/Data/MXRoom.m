@@ -40,6 +40,7 @@
 #import "MXEventContentLocation.h"
 #import "MatrixSDKSwiftHeader.h"
 #import "NSDictionary+MutableDeepCopy.h"
+#import "MXTimelineStore.h"
 
 NSString *const kMXRoomDidFlushDataNotification = @"kMXRoomDidFlushDataNotification";
 NSString *const kMXRoomInitialSyncNotification = @"kMXRoomInitialSyncNotification";
@@ -181,7 +182,12 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
             pendingLiveTimelineRequesters = [NSMutableArray array];
             
             MXWeakify(self);
-            [mxSession.store loadRoomMessagesForRoom:self.roomId completion:^{
+            void (^loadMessages)(dispatch_block_t) = ^(dispatch_block_t loaded) {
+                // MXTimelineStore читает ленту страницами: файл комнаты целиком грузить незачем, ждём только состояние.
+                if ([self.mxSession.store conformsToProtocol:@protocol(MXTimelineStore)]) loaded();
+                else [self.mxSession.store loadRoomMessagesForRoom:self.roomId completion:loaded];
+            };
+            loadMessages(^{
                 MXStrongifyAndReturnIfNil(self);
                 MXWeakify(self);
                 [MXRoomState loadRoomStateFromStore:self.mxSession.store withRoomId:self.roomId matrixSession:self.mxSession onComplete:^(MXRoomState *roomState) {
@@ -199,7 +205,7 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
                     }
                     MXLogDebug(@"[MXRoom] liveTimeline loaded. Pending requesters: %@", @(liveTimelineRequesters.count));
                 }];
-            }];
+            });
         }
 
         [pendingLiveTimelineRequesters addObject:onComplete];
@@ -3234,7 +3240,32 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
     
     // Check whether the event is posterior to the current position (if any).
     // Look for an acknowledgeable event if the event type is not acknowledgeable.
-    if (currentReadReceiptEventId || !isAcknowledgeable)
+    id<MXTimelineStore> timelineStore = [mxSession.store conformsToProtocol:@protocol(MXTimelineStore)] ? (id<MXTimelineStore>)mxSession.store : nil;
+    if (timelineStore && (currentReadReceiptEventId || !isAcknowledgeable))
+    {
+        // Позиции в ленте вместо обхода всей комнаты: последнее подтверждаемое событие не новее данного,
+        // в той же ленте (основной или треда), и только если оно новее текущей квитанции.
+        // События нет в базе (эхо) — оно новее всего, что есть: берём самое новое подтверждаемое.
+        int64_t eventOrder = MXRoomHoleOpenEnd;
+        if ([timelineStore orderOfEvent:event.eventId inRoom:self.roomId order:&eventOrder] && eventOrder != MXRoomHoleOpenEnd)
+        {
+            eventOrder += 1;
+        }
+        NSSet<NSString *> *types = [NSSet setWithArray:mxSession.acknowledgableEventTypes ?: @[]];
+        MXEvent *candidate = [timelineStore latestEventInRoom:self.roomId types:types
+                                                     threadId:event.threadId ?: kMXEventTimelineMain
+                                                  beforeOrder:eventOrder];
+        int64_t currentOrder, candidateOrder;
+        BOOL behindCurrent = currentReadReceiptEventId
+            && [timelineStore orderOfEvent:currentReadReceiptEventId inRoom:self.roomId order:&currentOrder]
+            && [timelineStore orderOfEvent:candidate.eventId inRoom:self.roomId order:&candidateOrder]
+            && candidateOrder <= currentOrder;
+        if (candidate.eventId && !behindCurrent && ![candidate.eventId isEqualToString:currentReadReceiptEventId])
+        {
+            updatedReadReceiptEvent = candidate;
+        }
+    }
+    else if (currentReadReceiptEventId || !isAcknowledgeable)
     {
         @autoreleasepool
         {
@@ -3350,6 +3381,14 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
     return [mxSession.store isRoomMarkedAsUnread:self.roomId];
 }
 
+/// Самое новое подтверждаемое событие комнаты (пустой массив — его нет).
+- (NSArray<MXEvent *> *)trscLatestAcknowledgeableEvents:(id<MXTimelineStore>)timelineStore
+{
+    NSSet<NSString *> *types = [NSSet setWithArray:mxSession.acknowledgableEventTypes ?: @[]];
+    MXEvent *latest = [timelineStore latestEventInRoom:self.roomId types:types threadId:nil beforeOrder:MXRoomHoleOpenEnd];
+    return latest ? @[latest] : @[];
+}
+
 - (void)markAllAsRead
 {
     [self resetUnread];
@@ -3357,7 +3396,10 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
     MXReceiptData *updatedReceiptData = nil;
     
     // Retrieve the most recent event of the room.
-    MXEvent *lastEvent = [mxSession.store messagesEnumeratorForRoom:self.roomId].nextEvent;
+    id<MXTimelineStore> timelineStore = [mxSession.store conformsToProtocol:@protocol(MXTimelineStore)] ? (id<MXTimelineStore>)mxSession.store : nil;
+    MXEvent *lastEvent = timelineStore
+        ? [timelineStore latestEventInRoom:self.roomId types:nil threadId:nil beforeOrder:MXRoomHoleOpenEnd]
+        : [mxSession.store messagesEnumeratorForRoom:self.roomId].nextEvent;
     NSString *lastMessageEventId = lastEvent.eventId;
     
     // Sanity check: Do not send read marker on event without id.
@@ -3383,10 +3425,13 @@ NSInteger const kMXRoomInvalidInviteSenderErrorCode = 9002;
         // Prepare updated read receipt
         @autoreleasepool
         {
-            id<MXEventsEnumerator> messagesEnumerator = [mxSession.store messagesEnumeratorForRoom:self.roomId withTypeIn:mxSession.acknowledgableEventTypes];
+            // MXTimelineStore: последнее подтверждаемое событие — один запрос по ord, без перечислителя по комнате.
+            id<MXEventsEnumerator> messagesEnumerator = timelineStore ? nil
+                : [mxSession.store messagesEnumeratorForRoom:self.roomId withTypeIn:mxSession.acknowledgableEventTypes];
+            NSEnumerator<MXEvent *> *latest = timelineStore ? [self trscLatestAcknowledgeableEvents:timelineStore].objectEnumerator : nil;
 
             // Acknowledge the lastest valid event
-            while ((event = messagesEnumerator.nextEvent))
+            while ((event = latest ? latest.nextObject : messagesEnumerator.nextEvent))
             {
                 // Sanity check on event id: Do not send read receipt on event without id
                 if (event.eventId && ([event.eventId hasPrefix:kMXRoomInviteStateEventIdPrefix] == NO))

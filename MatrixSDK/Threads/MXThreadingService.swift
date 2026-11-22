@@ -315,6 +315,37 @@ public class MXThreadingService: NSObject {
         return operation
     }
 
+    //  MARK: - Unread
+
+    /// Предел подсчёта непрочитанных в треде: бейдж больше этого не показывает, а стор не считает дальше.
+    private static let unreadCountLimit: UInt = 999
+
+    /// Непрочитанные и упоминания треда. MXTimelineStore считает по `ord` после квитанции одним запросом
+    /// (`countEvents…threadId:`); NSNotFound — события квитанции нет в базе, тогда прежний путь стора.
+    internal static func unreadCounts(store: MXStore, session: MXSession, roomId: String, threadId: String) -> (notifications: UInt, highlights: UInt) {
+        let types = session.unreadEventTypes ?? []
+        var notifications: UInt?
+        if let timelineStore = store as? MXTimelineStore {
+            let receipt = store.getReceiptInRoom(roomId, threadId: threadId, forUserId: session.myUserId)
+            let count = timelineStore.countEvents(inRoom: roomId,
+                                                  afterEventId: receipt?.eventId,
+                                                  types: Set(types),
+                                                  excludingSender: session.myUserId,
+                                                  threadId: threadId,
+                                                  limit: unreadCountLimit)
+            if count != UInt(NSNotFound) {
+                notifications = count
+            }
+        }
+        let notificationCount = notifications ?? store.localUnreadEventCount(roomId, threadId: threadId, withTypeIn: types)
+        guard notificationCount > 0 else {
+            return (0, 0)
+        }
+        let newEvents = store.newIncomingEvents(inRoom: roomId, threadId: threadId, withTypeIn: types)
+        let highlights = UInt(newEvents.filter { $0.shouldBeHighlighted(inSession: session) }.count)
+        return (notificationCount, highlights)
+    }
+
     //  MARK: - Private
 
     private func localThreads(inRoom roomId: String) -> [MXThreadProtocol] {
@@ -331,13 +362,10 @@ public class MXThreadingService: NSObject {
         var notificationCount: UInt = 0
         var highlightCount: UInt = 0
         if let store = session.store {
-            notificationCount = store.localUnreadEventCount(rootEvent.roomId,
-                                                            threadId: rootEvent.eventId,
-                                                            withTypeIn: session.unreadEventTypes)
-            let newEvents = store.newIncomingEvents(inRoom: rootEvent.roomId,
-                                                    threadId: rootEvent.eventId,
-                                                    withTypeIn: session.unreadEventTypes)
-            highlightCount = UInt(newEvents.filter { $0.shouldBeHighlighted(inSession: session) }.count)
+            let counts = MXThreadingService.unreadCounts(store: store, session: session,
+                                                         roomId: rootEvent.roomId, threadId: rootEvent.eventId)
+            notificationCount = counts.notifications
+            highlightCount = counts.highlights
         }
         if let localThread = thread(withId: rootEvent.eventId) {
             notificationCount = max(notificationCount, localThread.notificationCount)

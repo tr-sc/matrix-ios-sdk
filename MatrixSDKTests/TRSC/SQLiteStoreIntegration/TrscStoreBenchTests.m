@@ -275,6 +275,13 @@ static const NSUInteger kPage = 50;
             XCTAssertGreaterThanOrEqual(rows, MIN(kPage, [room[@"messages"] unsignedIntegerValue]),
                                         @"%@: store gave %tu rows", room[@"local"], rows);
 
+            // Scroll up: the next 50 rows of the same open timeline, still from the store.
+            CFAbsoluteTime nextStart = CFAbsoluteTimeGetCurrent();
+            NSUInteger nextRows = [self paginate:timeline count:kPage onlyFromStore:YES reset:NO];
+            NSMutableDictionary *nextCtx = [openCtx mutableCopy];
+            nextCtx[@"rows"] = @(nextRows);
+            [_journal record:@"chat_page_next" value:(CFAbsoluteTimeGetCurrent() - nextStart) * 1000 unit:@"ms" ctx:nextCtx];
+
             CFAbsoluteTime warmStart = CFAbsoluteTimeGetCurrent();
             NSUInteger warmRows = [self paginate:timeline count:kPage onlyFromStore:YES reset:YES];
             openCtx[@"rows"] = @(warmRows);

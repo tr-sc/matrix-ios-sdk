@@ -6,6 +6,7 @@
 #import "MXSQLiteOutgoingStore.h"
 
 #import <os/lock.h>
+#import <objc/runtime.h>
 
 #import "MXEvent.h"
 #import "MXEventDecryptionResult.h"
@@ -92,7 +93,18 @@ static NSString *const kColumnDraft = @"draft";
         result.clearEvent = clearDictionary;
         [event setClearData:result];
     }
-    event.sentState = (MXEventSentState)sentState;
+    // Состояние восстанавливается, а не меняется: без kMXEventDidChangeSentStateNotification. Иначе сводка комнаты
+    // на уведомление пересчитывает статус отправки, снова читает исходящие — и так по кругу (зависание на эхе).
+    // Так же поступает -[MXEvent initWithCoder:] у файлового стора.
+    Ivar ivar = class_getInstanceVariable(MXEvent.class, "_sentState");
+    if (ivar)
+    {
+        *(MXEventSentState *)((uint8_t *)(__bridge void *)event + ivar_getOffset(ivar)) = (MXEventSentState)sentState;
+    }
+    else
+    {
+        event.sentState = (MXEventSentState)sentState;
+    }
     return event;
 }
 
