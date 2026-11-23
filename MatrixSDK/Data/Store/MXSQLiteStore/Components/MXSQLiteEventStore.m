@@ -825,6 +825,18 @@ static NSString *MXSQLiteTokenForOrder(int64_t order)
     return [self countRowsInRoom:roomId filter:filter];
 }
 
+- (NSInteger)trscUnreadMessageCountInRoom:(NSString *)roomId types:(NSArray<NSString *> *)types limit:(NSUInteger)limit
+{
+    MXSQLiteEventFilter *filter = [self unreadFilterInRoom:roomId threadId:nil types:types];
+    if (!filter) return -1;
+    // Правило бейджа списка (`TrscUnreadPolicy` приложения): правка — не новое сообщение, реакция и ответ в
+    // треде строку не поднимают, служебные события состояния тоже. `unreadFilterInRoom` уже убрал своё и треды.
+    filter.excludeRedacted = YES;
+    filter.excludeState = YES;
+    filter.excludedRelTypes = [NSSet setWithObjects:@"m.replace", @"m.annotation", nil];
+    return (NSInteger)MIN(limit, [self countRowsInRoom:roomId filter:filter]);
+}
+
 - (NSDictionary<NSString *, NSNumber *> *)localUnreadEventCountPerThread:(NSString *)roomId withTypeIn:(NSArray *)types
 {
     NSMutableSet<NSString *> *threads = [NSMutableSet set];

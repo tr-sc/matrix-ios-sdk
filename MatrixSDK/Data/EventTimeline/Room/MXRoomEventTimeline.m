@@ -18,6 +18,8 @@
  */
 
 #import "MXRoomEventTimeline.h"
+#import <QuartzCore/QuartzCore.h>
+#import "MXTrscStoreMetrics.h"
 #import "MXHTTPOperation_Private.h"
 
 #import "MXSession.h"
@@ -73,6 +75,9 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
     // The events enumerator to paginate messages from the store.
     id<MXEventsEnumerator> storeMessagesEnumerator;
+
+    // TRSC iP12: первое окно после resetPagination ещё не замерено (chat_window_ms).
+    BOOL trscFirstWindowPending;
  
     // MXStore does only back pagination. So, the forward pagination token for
     // past timelines is managed locally.
@@ -336,6 +341,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 {
     [self cancelPendingPaginations];
     [backwardDeliveredEventIds removeAllObjects];
+    trscFirstWindowPending = _isLiveTimeline;
     // Reset the back state to the current room state
     backState = [[MXRoomState alloc] initBackStateWith:_state];
 
@@ -699,11 +705,19 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         }
     };
     MXHTTPProcessingLease *localLease = [operation beginProcessing];
+    BOOL measuresFirstWindow = trscFirstWindowPending && direction == MXTimelineDirectionBackwards;
+    if (measuresFirstWindow) trscFirstWindowPending = NO;
+    CFTimeInterval windowStarted = CACurrentMediaTime();
     consumeStored(^(NSArray<MXEvent *> *eventsFromStore) {
         @try
         {
             MXStrongifyAndReturnIfNil(self);
             if (!shouldApply()) return;
+            if (measuresFirstWindow)
+            {
+                [MXTrscStoreMetrics reportChatWindow:self->store milliseconds:(CACurrentMediaTime() - windowStarted) * 1000
+                                                rows:eventsFromStore.count anchor:@"live"];
+            }
 
             NSInteger remainingNumItems = numItems;
             NSUInteger eventsFromStoreCount = eventsFromStore.count;
@@ -784,9 +798,18 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
 
             MXWeakify(self);
             ordinaryHistoryRequest = direction == MXTimelineDirectionBackwards;
+            CFTimeInterval fetchStarted = CACurrentMediaTime();
+            NSUInteger fetchLimit = (NSUInteger)MAX(remainingNumItems, 0);
             MXHTTPOperation *operation2 = [self->room.mxSession.matrixRestClient messagesForRoom:self.state.roomId from:paginationToken direction:direction limit:remainingNumItems filter:self.roomEventFilter success:^(MXPaginationResponse *paginatedResponse) {
                 MXStrongifyAndReturnIfNil(self);
                 if (!shouldApply()) return;
+                // TRSC iP12: page_fetch_ms — запрос и запись страницы в стор (handlePaginationResponse ниже синхронно
+                // пишет события; выдача слушателям в замер не входит, как у Android).
+                void (^reportFetch)(void) = ^{
+                    [MXTrscStoreMetrics reportPageFetch:self->store milliseconds:(CACurrentMediaTime() - fetchStarted) * 1000
+                                              direction:direction == MXTimelineDirectionBackwards ? @"back" : @"forward"
+                                                  count:fetchLimit rows:paginatedResponse.chunk.count];
+                };
 
                 MXLogDebug(@"[MXRoomEventTimeline] paginate : got %tu messages from the server", paginatedResponse.chunk.count);
 
@@ -803,6 +826,7 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
                             }
                         }
                     } failure:finish onComplete:^{
+                        reportFetch();
                         MXLogDebug(@"[MXRoomEventTimeline] paginate: is done");
 
                         // Inform the method caller
@@ -1515,6 +1539,12 @@ NSString *const kMXRoomInviteStateEventIdPrefix = @"invite-";
         }
     }
     
+    if (_isLiveTimeline && direction == MXTimelineDirectionForwards && listeners.count)
+    {
+        // TRSC iP12: live_insert_ms — событие из ответа синка дошло до слушателей открытой ленты.
+        [MXTrscStoreMetrics reportLiveEventDelivered:event.eventId roomId:_state.roomId ?: event.roomId store:store];
+    }
+
     if (_isLiveTimeline && (direction == MXTimelineDirectionForwards))
     {
         // Check for local echo suppression
@@ -2133,12 +2163,21 @@ static NSError *MXRoomEventTimelineCancelledError(void)
         dispatch_async(dispatch_get_main_queue(), ^{ finish(operation.isCancelled ? MXRoomEventTimelineCancelledError() : nil); });
         return;
     }
+    BOOL measuresFirstWindow = trscFirstWindowPending && backwards && backwardCursor == MXRoomHoleOpenEnd;
+    if (measuresFirstWindow) trscFirstWindowPending = NO;
+    CFTimeInterval windowStarted = CACurrentMediaTime();
     MXStorePage *page = [self holesReadPage:remaining direction:direction];
     NSArray<MXEvent *> *events = page.events;
     MXWeakify(self);
     [self decryptEvents:events onComplete:^{
         MXStrongifyAndReturnIfNil(self);
         if (operation.isCancelled) { finish(MXRoomEventTimelineCancelledError()); return; }
+        if (measuresFirstWindow)
+        {
+            // TRSC iP12: chat_window_ms — первая страница чата из базы, расшифровка включена (как «read and built»).
+            [MXTrscStoreMetrics reportChatWindow:self->store milliseconds:(CACurrentMediaTime() - windowStarted) * 1000
+                                            rows:events.count anchor:@"live"];
+        }
         [self holesDeliver:events direction:direction];
         [self holesAdvanceWithPage:page direction:direction];
         MXLogDebug(@"[MXRoomEventTimeline] holes: %tu events from the store in %@ (%@)", events.count, self.state.roomId,
@@ -2176,6 +2215,7 @@ static NSError *MXRoomEventTimelineCancelledError(void)
         return;
     }
     __weak MXSession *session = room.mxSession;
+    CFTimeInterval fetchStarted = CACurrentMediaTime();
     MXWeakify(self);
     MXHTTPOperation *request = [session.matrixRestClient messagesForRoom:roomId from:token direction:direction limit:limit filter:_roomEventFilter success:^(MXPaginationResponse *response) {
         MXStrongifyAndReturnIfNil(self);
@@ -2206,6 +2246,9 @@ static NSError *MXRoomEventTimelineCancelledError(void)
             }
             [self->timelineStore applyPage:response toHole:hole direction:direction];
             [self->store commit];
+            // TRSC iP12: page_fetch_ms — запрос, расшифровка и запись в дыру (коммит на писателе — асинхронно).
+            [MXTrscStoreMetrics reportPageFetch:self->store milliseconds:(CACurrentMediaTime() - fetchStarted) * 1000
+                                      direction:backwards ? @"back" : @"forward" count:limit rows:response.chunk.count];
             next();
         }];
     } failure:^(NSError *error) {

@@ -193,6 +193,8 @@ static NSDictionary *MXSQLiteJSONObject(NSData *data)
     copy.excludeRedacted = _excludeRedacted;
     copy.relatesTo = _relatesTo;
     copy.relType = _relType;
+    copy.excludeState = _excludeState;
+    copy.excludedRelTypes = _excludedRelTypes;
     copy.eventId = _eventId;
     return copy;
 }
@@ -221,6 +223,8 @@ static NSDictionary *MXSQLiteJSONObject(NSData *data)
     if (_excludeRedacted && (row.flags & MXSQLiteEventFlagRedacted)) return NO;
     if (_relatesTo && ![row.relatesTo isEqualToString:_relatesTo]) return NO;
     if (_relType && ![row.relType isEqualToString:_relType]) return NO;
+    if (_excludeState && row.stateKey) return NO;
+    if (_excludedRelTypes && row.relType && [_excludedRelTypes containsObject:row.relType]) return NO;
     return YES;
 }
 
@@ -265,6 +269,16 @@ static NSDictionary *MXSQLiteJSONObject(NSData *data)
     if (_excludeRedacted) [sql appendString:@" AND (flags & 2) = 0"];
     if (_relatesTo) [sql appendFormat:@" AND relates_to = %@", param(_relatesTo)];
     if (_relType) [sql appendFormat:@" AND rel_type = %@", param(_relType)];
+    if (_excludeState) [sql appendString:@" AND state_key IS NULL"];
+    if (_excludedRelTypes.count)
+    {
+        NSMutableArray *placeholders = [NSMutableArray array];
+        for (NSString *relType in [_excludedRelTypes.allObjects sortedArrayUsingSelector:@selector(compare:)])
+        {
+            [placeholders addObject:param(relType)];
+        }
+        [sql appendFormat:@" AND (rel_type IS NULL OR rel_type NOT IN (%@))", [placeholders componentsJoinedByString:@","]];
+    }
     if (minTs != INT64_MIN) [sql appendFormat:@" AND (ts >= %@ OR state_key IS NOT NULL)", param(@(minTs))];
     return sql;
 }

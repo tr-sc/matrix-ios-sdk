@@ -22,6 +22,7 @@
 
 #import <AFNetworking/AFNetworking.h>
 #import <os/signpost.h>
+#import <QuartzCore/QuartzCore.h>
 
 #import "MXSessionEventListener.h"
 
@@ -475,9 +476,16 @@ typedef void (^MXOnResumeDone)(void);
     NSDate *startDate = [NSDate date];
     MXTaskProfile *taskProfile = [MXSDKOptions.sharedInstance.profiler startMeasuringTaskWithName:MXTaskProfileNameStartupMountData];
 
+    // TRSC iP12: db_open_ms и тайминги транзакций SQLite в журнал запуска.
+    if ([self.store conformsToProtocol:@protocol(MXTimelineStore)])
+    {
+        ((id<MXTimelineStore>)self.store).metricsDelegate = MXTrscStoreMetrics.shared;
+    }
+    CFTimeInterval storeOpenStarted = CACurrentMediaTime();
     MXWeakify(self);
     [self.store openWithCredentials:matrixRestClient.credentials onComplete:^{
         MXStrongifyAndReturnIfNil(self);
+        [MXTrscStoreMetrics reportStoreOpen:self.store milliseconds:(CACurrentMediaTime() - storeOpenStarted) * 1000];
         
         // Sanity check: The session may be closed before the end of store opening.
         if (!self->matrixRestClient)
@@ -801,6 +809,19 @@ typedef void (^MXOnResumeDone)(void);
     
     // Check whether this is the initial sync
     BOOL isInitialSync = !self.isEventStreamInitialised;
+    // TRSC iP12: live_insert_ms считается от этого места — ответ разобран и дошёл до сессии.
+    if (MXTrscStoreMetrics.sink && !isInitialSync)
+    {
+        NSMutableArray<NSString *> *syncEventIds = [NSMutableArray array];
+        for (MXRoomSync *roomSync in syncResponse.rooms.join.allValues)
+        {
+            for (MXEvent *event in roomSync.timeline.events)
+            {
+                if (event.eventId) [syncEventIds addObject:event.eventId];
+            }
+        }
+        [MXTrscStoreMetrics noteSyncEventIds:syncEventIds];
+    }
 
     [self handleCryptoEventsInSyncResponse:syncResponse onComplete:^{
         
@@ -1094,7 +1115,17 @@ typedef void (^MXOnResumeDone)(void);
             // Commit store changes
             if ([self.store respondsToSelector:@selector(commitWithCompletion:)])
             {
-                [self.store commitWithCompletion:storeCompletion];
+                // TRSC iP12: sync_persist_ms — запись этого ответа в стор.
+                id<MXStore> persistStore = self.store;
+                NSUInteger persistEvents = 0;
+                for (MXRoomSync *roomSync in syncResponse.rooms.join.allValues) persistEvents += roomSync.timeline.events.count;
+                for (MXRoomSync *roomSync in syncResponse.rooms.leave.allValues) persistEvents += roomSync.timeline.events.count;
+                NSUInteger persistRooms = syncResponse.rooms.join.count + syncResponse.rooms.invite.count + syncResponse.rooms.leave.count;
+                [MXTrscStoreMetrics beginSyncPersistOfStore:persistStore events:persistEvents rooms:persistRooms initial:isInitialSync];
+                [self.store commitWithCompletion:^{
+                    [MXTrscStoreMetrics endSyncPersistOfStore:persistStore];
+                    if (storeCompletion) storeCompletion();
+                }];
             }
             else if (storeCompletion)
             {

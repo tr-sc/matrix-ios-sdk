@@ -43,7 +43,12 @@ public class MXCoreDataRoomListDataManager: NSObject, MXRoomListDataManager {
             fatalError("[MXCoreDataRoomListDataManager] No session store")
         }
         guard let coreDataStore = store.roomSummaryStore as? MXRoomSummaryCoreDataContextableStore else {
-            fatalError("[MXCoreDataRoomListDataManager] Session.store.roomSummaryStore is not CoreDataContextable")
+            // TRSC iP11: у MXSQLiteStore сводки в базе стора, без CoreData — список читает их напрямую.
+            // Выбор по сессии, а не глобальным `MXSDKOptions.roomListDataManagerClass`: аккаунты могут жить
+            // на разных сторах.
+            return MXStoreRoomListDataFetcher(fetchOptions: options,
+                                              store: store.roomSummaryStore,
+                                              session: session)
         }
         
         assert(coreDataStore.mainManagedObjectContext.concurrencyType == .mainQueueConcurrencyType,
