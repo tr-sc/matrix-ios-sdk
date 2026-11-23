@@ -75,7 +75,12 @@ FOUNDATION_EXPORT NSString *const MXRoomHistoryGapsDidChangeNotification;
 
 /** Загрузить не более 50 событий по курсору интервала, а не по курсору самой старой истории.
  При успехе восстановленная страница передаётся от новых событий к старым. Застрявший интервал остаётся сохранённым,
- а операция завершается ошибкой MXRoomHistoryGap вместо ложного подтверждения непрерывности. */
+ а операция завершается ошибкой MXRoomHistoryGap вместо ложного подтверждения непрерывности.
+
+ На сторе с дырами (`MXTimelineStore`, ADR-0022) `gapId` — это `MXRoomHole.holeId` дыры основной ленты: экран чата
+ (iP10) берёт его из `holesInRoom:thread:` и рисует границу ленты над первой видимой строкой выше дыры. Одна страница
+ `/messages` от `backwardToken` дыры, затем `applyPage:toHole:direction:` и коммит. Дыра без такого id (её уже закрыл
+ синк или другой ответ) — ошибка MXRoomHistoryGap code 1. */
 - (MXHTTPOperation *)paginateHistoryGap:(NSString *)gapId
                                success:(void (^)(NSArray<MXEvent *> *events))success
                                failure:(void (^)(NSError *error))failure NS_SWIFT_NAME(paginateHistoryGap(_:success:failure:));
