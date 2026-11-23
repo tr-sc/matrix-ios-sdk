@@ -23,6 +23,7 @@ static NSString *const kKeyCapabilities = @"capabilities";
 static NSString *const kKeyVersions = @"versions";
 static NSString *const kKeyAuthMetadata = @"auth_metadata";
 static NSString *const kKeyMaxUploadSize = @"max_upload_size";
+static NSString *const kKeySlidingSyncState = @"sliding_sync_state";
 NSString *const MXSQLiteMetaKeyLegacyImportDone = @"legacy_import_done";
 
 @interface MXSQLiteMetaStore ()
@@ -135,6 +136,9 @@ NSString *const MXSQLiteMetaKeyLegacyImportDone = @"legacy_import_done";
 
 - (BOOL)legacyFileStoreImported { return [[self metaObjectForKey:MXSQLiteMetaKeyLegacyImportDone] boolValue]; }
 - (void)setLegacyFileStoreImported:(BOOL)imported { [self setMetaObject:@(imported) forKey:MXSQLiteMetaKeyLegacyImportDone]; }
+
+- (NSDictionary *)trscSlidingSyncState { return [self metaObjectForKey:kKeySlidingSyncState]; }
+- (void)setTrscSlidingSyncState:(NSDictionary *)state { [self setMetaObject:[state copy] forKey:kKeySlidingSyncState]; }
 
 #pragma mark - Users
 

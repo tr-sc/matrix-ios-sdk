@@ -325,12 +325,16 @@ public class MXThreadingService: NSObject {
     internal static func unreadCounts(store: MXStore, session: MXSession, roomId: String, threadId: String) -> (notifications: UInt, highlights: UInt) {
         let types = session.unreadEventTypes ?? []
         var notifications: UInt?
+        // Закрытая сессия (поздний ответ сети после close) уже без myUserId: считать не для кого.
+        guard let myUserId = session.myUserId else {
+            return (0, 0)
+        }
         if let timelineStore = store as? MXTimelineStore {
-            let receipt = store.getReceiptInRoom(roomId, threadId: threadId, forUserId: session.myUserId)
+            let receipt = store.getReceiptInRoom(roomId, threadId: threadId, forUserId: myUserId)
             let count = timelineStore.countEvents(inRoom: roomId,
                                                   afterEventId: receipt?.eventId,
                                                   types: Set(types),
-                                                  excludingSender: session.myUserId,
+                                                  excludingSender: myUserId,
                                                   threadId: threadId,
                                                   limit: unreadCountLimit)
             if count != UInt(NSNotFound) {

@@ -11,6 +11,8 @@
 
 #import "MXBackgroundModeHandler.h"
 #import "MXCredentials.h"
+#import "MXEvent.h"
+#import "MXEvent+TrscOrder.h"
 #import "MXLog.h"
 #import "MXSDKOptions.h"
 #import "MatrixSDKSwiftHeader.h"
@@ -31,6 +33,8 @@ static NSUInteger const kMXSQLiteStoreReaderCount = 2;
 
 static NSString *gKeychainAccessGroup;
 
+NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
+
 @interface MXSQLiteStore ()
 {
     os_unfair_lock _pendingLock;
@@ -46,6 +50,8 @@ static NSString *gKeychainAccessGroup;
 /// Комнаты, строки которых удаляются в следующем коммите.
 @property (nonatomic) NSMutableOrderedSet<NSString *> *pendingRoomDeletions;
 @property (nonatomic) id<MXBackgroundTask> commitBackgroundTask;
+/// Стор NSE: коммит пишет только внутри `insertPushEvent:` (флаг под писателем вызывающего потока).
+@property (atomic) BOOL extensionWriteAllowed;
 @end
 
 // Методы MXStore / MXTimelineStore, которых фасад не реализует, реализуют компоненты: их отдаёт
@@ -58,6 +64,7 @@ static NSString *gKeychainAccessGroup;
 @synthesize roomSummaryStore = _roomSummaryStore;
 @synthesize storeService = _storeService;
 @synthesize metricsDelegate = _metricsDelegate;
+@dynamic trscSlidingSyncState;
 
 #pragma mark - Class
 
@@ -112,6 +119,12 @@ static NSString *gKeychainAccessGroup;
     return [@"store." stringByAppendingString:[self hashedUserId:userId]];
 }
 
++ (BOOL)hasDatabaseForUserId:(NSString *)userId rootDirectory:(NSURL *)rootDirectory
+{
+    NSURL *url = [self databaseURLForUserId:userId rootDirectory:rootDirectory ?: self.defaultRootDirectory];
+    return [NSFileManager.defaultManager fileExistsAtPath:url.path];
+}
+
 + (void)deleteDataForUserId:(NSString *)userId rootDirectory:(NSURL *)rootDirectory keyProvider:(id<MXSQLiteKeyProviding>)keyProvider
 {
     NSURL *url = [self databaseURLForUserId:userId rootDirectory:rootDirectory ?: self.defaultRootDirectory];
@@ -156,6 +169,16 @@ static NSString *gKeychainAccessGroup;
             outgoing,
         ];
         _routes = [MXSQLiteStore routesForComponents:_components];
+    }
+    return self;
+}
+
+- (instancetype)initForExtensionWithKeyProvider:(id<MXSQLiteKeyProviding>)keyProvider rootDirectory:(NSURL *)rootDirectory
+{
+    self = [self initWithKeyProvider:keyProvider rootDirectory:rootDirectory readOnly:NO];
+    if (self)
+    {
+        _extensionMode = YES;
     }
     return self;
 }
@@ -238,13 +261,7 @@ static NSString *gKeychainAccessGroup;
 
 - (void)openWithCredentials:(MXCredentials *)credentials onComplete:(void (^)(void))onComplete failure:(void (^)(NSError *))failure
 {
-    NSParameterAssert(credentials.userId);
-    self.context.credentials = credentials;
-    if (!_roomSummaryStore)
-    {
-        // До iP5 сводки остаются в CoreData (отдельный протокол, переход прозрачен).
-        _roomSummaryStore = [[MXCoreDataRoomSummaryStore alloc] initWithCredentials:credentials];
-    }
+    [self prepareForCredentials:credentials];
 
     id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
     id<MXBackgroundTask> backgroundTask = [handler startBackgroundTaskWithName:@"[MXSQLiteStore] openWithCredentials"];
@@ -276,6 +293,42 @@ static NSString *gKeychainAccessGroup;
     });
 }
 
+- (void)prepareForCredentials:(MXCredentials *)credentials
+{
+    NSParameterAssert(credentials.userId);
+    self.context.credentials = credentials;
+    if (!_roomSummaryStore)
+    {
+        // До iP5 сводки остаются в CoreData (отдельный протокол, переход прозрачен).
+        _roomSummaryStore = [[MXCoreDataRoomSummaryStore alloc] initWithCredentials:credentials];
+    }
+}
+
+- (BOOL)openSynchronouslyWithCredentials:(MXCredentials *)credentials error:(NSError **)error
+{
+    [self prepareForCredentials:credentials];
+    __block MXSQLiteDatabase *database;
+    __block NSError *openError;
+    dispatch_sync(self.openQueue, ^{
+        database = [self openDatabaseForUserId:credentials.userId error:&openError];
+    });
+    if (!database)
+    {
+        MXLogWarning(@"[MXSQLiteStore] synchronous open failed: %@", openError.localizedDescription);
+        if (error)
+        {
+            *error = openError;
+        }
+        return NO;
+    }
+    self.context.database = database;
+    if ([self.metricsDelegate respondsToSelector:@selector(store:didOpenInMilliseconds:databaseBytes:)])
+    {
+        [self.metricsDelegate store:self didOpenInMilliseconds:database.openMilliseconds databaseBytes:database.fileSize];
+    }
+    return YES;
+}
+
 /// Открытие с самовосстановлением. Отказ без пересоздания — только когда под нами не SQLCipher: снести базу тут
 /// значит молча продолжить открытым текстом.
 - (MXSQLiteDatabase *)openDatabaseForUserId:(NSString *)userId error:(NSError **)error
@@ -283,7 +336,9 @@ static NSString *gKeychainAccessGroup;
     NSURL *url = [MXSQLiteStore databaseURLForUserId:userId rootDirectory:self.rootDirectory];
     NSString *keyIdentifier = [MXSQLiteStore keyIdentifierForUserId:userId];
 
-    if (self.readOnly && ![NSFileManager.defaultManager fileExistsAtPath:url.path])
+    // NSE (только чтение или стор расширения) ничего не создаёт: нет базы приложения — нет SQLite.
+    BOOL existingOnly = self.readOnly || self.extensionMode;
+    if (existingOnly && ![NSFileManager.defaultManager fileExistsAtPath:url.path])
     {
         if (error)
         {
@@ -293,7 +348,7 @@ static NSString *gKeychainAccessGroup;
         return nil;
     }
 
-    MXSQLiteKeyMaterial *material = [self.keyProvider keyMaterialForIdentifier:keyIdentifier create:!self.readOnly error:error];
+    MXSQLiteKeyMaterial *material = [self.keyProvider keyMaterialForIdentifier:keyIdentifier create:!existingOnly error:error];
     if (!material)
     {
         return nil;
@@ -302,7 +357,7 @@ static NSString *gKeychainAccessGroup;
     NSError *openError;
     MXSQLiteDatabase *database = [MXSQLiteDatabase openAtURL:url key:material.key salt:material.salt readOnly:self.readOnly
                                                  readerCount:kMXSQLiteStoreReaderCount error:&openError];
-    if (!database && !self.readOnly && [self isRecoverableOpenError:openError])
+    if (!database && !existingOnly && [self isRecoverableOpenError:openError])
     {
         NSString *reason = openError.code == MXSQLiteErrorKeyRejected ? @"key_rejected" : @"corrupt";
         MXLogWarning(@"[MXSQLiteStore] Recreating the store (%@): %@", reason, openError.localizedDescription);
@@ -331,6 +386,19 @@ static NSString *gKeychainAccessGroup;
         [database close];
         return nil;
     }
+    if (self.extensionMode)
+    {
+        // Приложение не ждёт NSE (его транзакции — миллисекунды), а NSE не висит за долгой транзакцией приложения.
+        NSString *pragma = [NSString stringWithFormat:@"PRAGMA busy_timeout = %ld;", (long)MXSQLiteExtensionBusyTimeoutMilliseconds];
+        BOOL ok = [database withWriter:^BOOL(MXSQLiteConnection *connection, NSError **blockError) {
+            return [connection execute:pragma error:blockError];
+        } error:error];
+        if (!ok)
+        {
+            [database close];
+            return nil;
+        }
+    }
     return database;
 }
 
@@ -350,7 +418,7 @@ static NSString *gKeychainAccessGroup;
 
 - (BOOL)prepareSchemaOfDatabase:(MXSQLiteDatabase *)database error:(NSError **)error
 {
-    if (database.readOnly)
+    if (database.readOnly || self.extensionMode)
     {
         // NSE схему не трогает: чужая версия — работаем как без стора.
         int64_t version = [[database read:^id(MXSQLiteConnection *connection) {
@@ -532,8 +600,9 @@ static NSString *gKeychainAccessGroup;
 - (void)commitWithCompletion:(void (^)(void))completion
 {
     MXSQLiteDatabase *database = self.context.database;
-    NSArray<NSArray *> *parts = (database && !self.readOnly) ? [self takePendingWrites] : @[];
-    NSArray<NSString *> *deletions = (database && !self.readOnly) ? [self takePendingRoomDeletions] : @[];
+    BOOL writable = database && self.canWrite;
+    NSArray<NSArray *> *parts = writable ? [self takePendingWrites] : @[];
+    NSArray<NSString *> *deletions = writable ? [self takePendingRoomDeletions] : @[];
     if (!parts.count && !deletions.count)
     {
         if (completion)
@@ -582,18 +651,29 @@ static NSString *gKeychainAccessGroup;
     }];
 }
 
+/// Пишет ли `commit` / `flush`: у NSE — только внутри `insertPushEvent:`.
+- (BOOL)canWrite
+{
+    return !self.readOnly && (!self.extensionMode || self.extensionWriteAllowed);
+}
+
 - (void)flush
 {
+    [self flushWithError:nil];
+}
+
+- (BOOL)flushWithError:(NSError **)outError
+{
     MXSQLiteDatabase *database = self.context.database;
-    if (!database || self.readOnly || database.isOnWriterQueue)
+    if (!database || !self.canWrite || database.isOnWriterQueue)
     {
-        return;
+        return database != nil;
     }
     NSArray<NSArray *> *parts = [self takePendingWrites];
     NSArray<NSString *> *deletions = [self takePendingRoomDeletions];
     if (!parts.count && !deletions.count)
     {
-        return;
+        return YES;
     }
     MXSQLiteCommitContext *commit = [MXSQLiteCommitContext new];
     NSMutableDictionary *revisions = [NSMutableDictionary dictionary];
@@ -603,6 +683,86 @@ static NSString *gKeychainAccessGroup;
     if (!ok)
     {
         MXLogErrorDetails(@"[MXSQLiteStore] flush failed", @{@"error": error ?: NSNull.null});
+        if (outError)
+        {
+            *outError = error;
+        }
+    }
+    return ok;
+}
+
+#pragma mark - Push event (NSE)
+
+- (BOOL)insertPushEvent:(MXEvent *)event inRoom:(NSString *)roomId error:(NSError **)error
+{
+    NSError *(^failure)(NSString *) = ^NSError *(NSString *reason) {
+        return [NSError errorWithDomain:MXSQLiteErrorDomain code:MXSQLiteErrorOpenFailed
+                               userInfo:@{NSLocalizedDescriptionKey: reason}];
+    };
+    MXSQLiteDatabase *database = self.context.database;
+    NSString *reason;
+    if (!database || self.readOnly)
+    {
+        reason = @"store is not open for writing";
+    }
+    else if (!event.eventId.length || !roomId.length || !event.hasTrscOrder)
+    {
+        reason = @"event has no position";
+    }
+    else
+    {
+        NSNumber *rid = [database read:^id(MXSQLiteConnection *connection) {
+            return @([self.rooms ridForRoomId:roomId connection:connection]);
+        }];
+        if (rid.longLongValue == MXSQLiteNoRoom)
+        {
+            reason = @"unknown room";
+        }
+    }
+    // insertDetachedEvent: — метод компонента событий (через forwardingTargetForSelector:).
+    if (!reason && ![(id<MXTimelineStore>)self insertDetachedEvent:event inRoom:roomId])
+    {
+        reason = @"event is already stored";
+    }
+    if (reason)
+    {
+        if (error)
+        {
+            *error = failure(reason);
+        }
+        return NO;
+    }
+
+    CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
+    self.extensionWriteAllowed = YES;
+    NSError *writeError;
+    BOOL ok = [self flushWithError:&writeError];
+    self.extensionWriteAllowed = NO;
+    if (!ok)
+    {
+        // Строка осталась в накладке этого процесса — в базе её нет; повторный пуш попробует снова.
+        MXLogWarning(@"[MXSQLiteStore] push event not stored: %@", writeError.localizedDescription);
+        [self dropPendingWrites];
+        if (error)
+        {
+            *error = writeError ?: failure(@"write failed");
+        }
+        return NO;
+    }
+    MXLogDebug(@"[MXSQLiteStore] push event stored in %.1f ms", (CFAbsoluteTimeGetCurrent() - start) * 1000);
+    return YES;
+}
+
+/// Сбросить накладку после неудачной записи NSE: иначе следующий `insertPushEvent:` увидит событие «уже есть».
+- (void)dropPendingWrites
+{
+    for (id<MXSQLiteStoreComponent> component in self.components)
+    {
+        // Только события: накладки остальных компонентов у NSE пусты, а их кеши (мета) сбрасывать незачем.
+        if ([component isKindOfClass:MXSQLiteEventStore.class] && [component respondsToSelector:@selector(didDeleteAllData)])
+        {
+            [component didDeleteAllData];
+        }
     }
 }
 
@@ -610,7 +770,7 @@ static NSString *gKeychainAccessGroup;
 {
     [self flush];
     MXSQLiteDatabase *database = self.context.database;
-    if (database && !self.readOnly)
+    if (database && !self.readOnly && !self.extensionMode)
     {
         [database checkpoint:MXSQLiteCheckpointPassive];
     }
@@ -643,7 +803,7 @@ static NSString *gKeychainAccessGroup;
     [database close];
 
     NSString *userId = self.context.credentials.userId;
-    if (userId && !self.readOnly)
+    if (userId && !self.readOnly && !self.extensionMode)
     {
         [MXSQLiteStore deleteDataForUserId:userId rootDirectory:self.rootDirectory keyProvider:self.keyProvider];
     }
