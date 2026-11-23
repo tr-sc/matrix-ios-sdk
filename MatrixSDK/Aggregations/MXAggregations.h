@@ -23,6 +23,8 @@
 #import "MXReactionCountChange.h"
 #import "MXEvent.h"
 #import "MXAggregationPaginatedResponse.h"
+#import "MXAggregationsStore.h"
+#import "MXStore.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -207,6 +209,14 @@ NS_ASSUME_NONNULL_BEGIN
  Note: An initial sync is then required to get valid data.
  */
 - (void)resetData;
+
+#pragma mark - Store
+
+/**
+ Стор агрегаций для стора сессии: у `MXSQLiteStore` (флаг `sqlite_store` в приложении) — таблицы реакций в той же
+ базе, а старый Realm-стор аккаунта удаляется; у остальных сторов — Realm, как раньше.
+ */
++ (id<MXAggregationsStore>)aggregationsStoreForSessionStore:(id<MXStore>)store credentials:(MXCredentials *)credentials;
 
 @end
 
