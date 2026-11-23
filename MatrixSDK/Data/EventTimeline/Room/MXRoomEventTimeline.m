@@ -2219,8 +2219,8 @@ static NSError *MXRoomEventTimelineCancelledError(void)
     [operation mutateTo:request];
 }
 
-/// Прокладка для экрана чата, который ещё работает с MXRoomHistoryGap (iP10 переведёт его на MXRoomHole):
-/// id разрыва — это holeId дыры (см. historyGapsForRoom: у MXSQLiteStore). Одна страница в дыру через applyPage;
+/// Догрузка дыры для экрана чата (iP10): id разрыва — это holeId дыры. Экран берёт его из holesInRoom:thread:
+/// (TrscChatStoreSource.holeGaps), старый путь — из historyGapsForRoom: у MXSQLiteStore; id у обоих один. Одна страница в дыру через applyPage;
 /// success получает новые события страницы от новых к старым, как прежняя реализация.
 - (MXHTTPOperation *)holesPaginateHistoryGap:(NSString *)gapId success:(void (^)(NSArray<MXEvent *> *))success failure:(void (^)(NSError *))failure
 {
