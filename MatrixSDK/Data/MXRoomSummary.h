@@ -308,6 +308,15 @@ FOUNDATION_EXPORT NSUInteger const MXRoomSummaryPaginationChunkSize;
 @property (nonatomic) NSUInteger localUnreadEventCount;
 
 /**
+ TRSC (iP11): непрочитанные **сообщения** для бейджа строки списка — после своей квитанции основной ленты, без
+ своих, правок, реакций, ответов в тредах, событий состояния и удалённых, не больше 100. Считается одним запросом
+ стора `MXTimelineStore` (`trscUnreadMessageCountInRoom:types:limit:`) там же, где `localUnreadEventCount`, и
+ хранится в сводке: главная берёт его без обхода стора. -1 — неизвестно (стор без `MXTimelineStore`, нет своей
+ квитанции или её события): тогда строка показывает серверный счётчик. `markAllAsRead` обнуляет.
+ */
+@property (nonatomic) NSInteger trscUnreadCount;
+
+/**
  The number of unread messages that match the push notification rules.
  It is based on the notificationCount field in /sync response.
  */

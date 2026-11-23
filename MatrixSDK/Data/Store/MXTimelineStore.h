@@ -183,6 +183,14 @@ FOUNDATION_EXPORT int64_t const MXRoomHoleOpenEnd;
                        threadId:(nullable NSString *)threadId
                           limit:(NSUInteger)limit;
 
+/**
+ TRSC (iP11): непрочитанные сообщения строки списка чатов одним запросом — события `types` основной ленты после
+ своей квитанции, без своих, удалённых, событий состояния, правок (`m.replace`) и реакций (`m.annotation`), не больше
+ `limit`. -1 — своей квитанции или её события в базе нет (считать не от чего: вызывающий берёт серверный счётчик).
+ Зовётся из `MXRoomSummary` при обновлении сводки; результат лежит в `MXRoomSummary.trscUnreadCount`.
+ */
+- (NSInteger)trscUnreadMessageCountInRoom:(NSString *)roomId types:(nullable NSArray<NSString *> *)types limit:(NSUInteger)limit;
+
 /// Первые `limit` сводок по убыванию последней активности — для первого кадра главной.
 - (NSArray<id<MXRoomSummaryProtocol>> *)summariesOrderedByActivity:(NSUInteger)limit;
 

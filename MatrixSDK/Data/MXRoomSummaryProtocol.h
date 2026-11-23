@@ -155,6 +155,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak, readonly) MXSession * _Nullable mxSession;
 
+/// TRSC (iP11): непрочитанные сообщения по правилу списка чатов, посчитанные стором `MXTimelineStore` при
+/// обновлении сводки; -1 — неизвестно (нет своей квитанции или стор не умеет). См. `MXRoomSummary.trscUnreadCount`.
+@property (nonatomic, readonly) NSInteger trscUnreadCount;
+
 - (void)setMatrixSession:(MXSession *)mxSession;
 
 @end

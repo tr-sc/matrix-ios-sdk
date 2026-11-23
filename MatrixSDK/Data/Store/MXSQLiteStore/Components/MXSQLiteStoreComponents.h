@@ -40,6 +40,8 @@
 
 - (NSUInteger)localUnreadEventCount:(nonnull NSString*)roomId threadId:(nullable NSString*)threadId withTypeIn:(nullable NSArray*)types;
 - (nonnull NSDictionary <NSString *, NSNumber *> *)localUnreadEventCountPerThread:(nonnull NSString*)roomId withTypeIn:(nullable NSArray*)types;
+/// TRSC (iP11): см. `MXTimelineStore trscUnreadMessageCountInRoom:types:limit:`.
+- (NSInteger)trscUnreadMessageCountInRoom:(nonnull NSString *)roomId types:(nullable NSArray<NSString *> *)types limit:(NSUInteger)limit;
 - (nonnull NSArray<MXEvent*>*)newIncomingEventsInRoom:(nonnull NSString*)roomId
                                              threadId:(nullable NSString*)threadId
                                            withTypeIn:(nullable NSArray<MXEventTypeString>*)types;

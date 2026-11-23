@@ -131,9 +131,16 @@ internal class MXStoreRoomListDataFetcher: NSObject, MXRoomListDataFetcher {
             numberOfItems = (data.currentPage + 2) * data.paginationOptions.rawValue
         } else {
             //  load first page
-            for roomId in store.rooms {
-                if let summary = store.summary(ofRoom: roomId) {
-                    self.roomSummaries[roomId] = summary
+            if let sqlite = store as? MXSQLiteRoomSummaryStore {
+                // TRSC iP11: все сводки одним запросом, а не `rooms` + запрос на каждую комнату.
+                for summary in sqlite.allSummariesSync() {
+                    self.roomSummaries[summary.roomId] = summary
+                }
+            } else {
+                for roomId in store.rooms {
+                    if let summary = store.summary(ofRoom: roomId) {
+                        self.roomSummaries[roomId] = summary
+                    }
                 }
             }
             numberOfItems = fetchOptions.paginationOptions.rawValue

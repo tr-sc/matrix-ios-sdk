@@ -30,6 +30,7 @@
 #import "MXRoomSyncUnreadNotifications.h"
 
 #import "MXRoomSync.h"
+#import "MXTimelineStore.h"
 #import "MatrixSDKSwiftHeader.h"
 
 #import <Security/Security.h>
@@ -52,6 +53,8 @@ NSUInteger const MXRoomSummaryPaginationChunkSize = 50;
  Time to wait before refreshing trust when a change has been detected.
  */
 static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
+/// Больше бейдж всё равно показывает «99+».
+static NSUInteger const MXRoomSummaryTrscUnreadLimit = 100;
 
 
 @interface MXRoomSummary ()
@@ -85,6 +88,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     {
         updatedWithStateEvents = NO;
         nextTrustComputation = MXRoomSummaryNextTrustComputationNone;
+        _trscUnreadCount = -1;
     }
     return self;
 }
@@ -261,6 +265,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     _isEncrypted = summary.isEncrypted;
     _trust = summary.trust;
     _localUnreadEventCount = summary.localUnreadEventCount;
+    _trscUnreadCount = [summary respondsToSelector:@selector(trscUnreadCount)] ? summary.trscUnreadCount : -1;
     _notificationCount = summary.notificationCount;
     _highlightCount = summary.highlightCount;
     _hasAnyUnread = summary.hasAnyUnread;
@@ -793,6 +798,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     
     _notificationCount = 0;
     _highlightCount = 0;
+    if (_trscUnreadCount > 0) _trscUnreadCount = 0;
     
     // Broadcast the change
     [[NSNotificationCenter defaultCenter] postNotificationName:kMXRoomSummaryDidChangeNotification object:self userInfo:nil];
@@ -853,6 +859,20 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     {
         self.localUnreadEventCount = localUnreadEventCount;
         updated = YES;
+    }
+
+    // TRSC (iP11): число для строки списка — одним запросом базы, пока сводка и так обновляется.
+    id<MXStore> store = self.mxSession.store;
+    if ([store respondsToSelector:@selector(trscUnreadMessageCountInRoom:types:limit:)])
+    {
+        NSInteger trscUnread = [(id<MXTimelineStore>)store trscUnreadMessageCountInRoom:self.roomId
+                                                                                   types:self.mxSession.unreadEventTypes
+                                                                                   limit:MXRoomSummaryTrscUnreadLimit];
+        if (_trscUnreadCount != trscUnread)
+        {
+            _trscUnreadCount = trscUnread;
+            updated = YES;
+        }
     }
     
     return updated;
@@ -1058,6 +1078,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
         _isEncrypted = [aDecoder decodeBoolForKey:@"isEncrypted"];
         _trust = [aDecoder decodeObjectForKey:@"trust"];
         _localUnreadEventCount = (NSUInteger)[aDecoder decodeIntegerForKey:@"localUnreadEventCount"];
+        _trscUnreadCount = [aDecoder containsValueForKey:@"trscUnreadCount"] ? [aDecoder decodeIntegerForKey:@"trscUnreadCount"] : -1;
         _notificationCount = (NSUInteger)[aDecoder decodeIntegerForKey:@"notificationCount"];
         _highlightCount = (NSUInteger)[aDecoder decodeIntegerForKey:@"highlightCount"];
         _directUserId = [aDecoder decodeObjectForKey:@"directUserId"];
@@ -1110,6 +1131,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
         [aCoder encodeObject:_trust forKey:@"trust"];
     }
     [aCoder encodeInteger:(NSInteger)_localUnreadEventCount forKey:@"localUnreadEventCount"];
+    [aCoder encodeInteger:_trscUnreadCount forKey:@"trscUnreadCount"];
     [aCoder encodeInteger:(NSInteger)_notificationCount forKey:@"notificationCount"];
     [aCoder encodeInteger:(NSInteger)_highlightCount forKey:@"highlightCount"];
     [aCoder encodeObject:_directUserId forKey:@"directUserId"];
@@ -1153,6 +1175,7 @@ static NSUInteger const kMXRoomSummaryTrustComputationDelayMs = 1000;
     result = prime * result + _isEncrypted;
     result = prime * result + [_trust hash];
     result = prime * result + _localUnreadEventCount;
+    result = prime * result + (NSUInteger)_trscUnreadCount;
     result = prime * result + _notificationCount;
     result = prime * result + _highlightCount;
     result = prime * result + @(_hasAnyUnread).unsignedIntegerValue;

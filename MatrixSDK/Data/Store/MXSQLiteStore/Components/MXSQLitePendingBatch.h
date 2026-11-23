@@ -91,6 +91,10 @@ typedef NS_ENUM(NSInteger, MXSQLiteThreadScope)
 @property (nonatomic) BOOL excludeRedacted;
 @property (nonatomic, copy, nullable) NSString *relatesTo;
 @property (nonatomic, copy, nullable) NSString *relType;
+/// Без событий состояния (`state_key IS NULL`).
+@property (nonatomic) BOOL excludeState;
+/// Без связей этих типов (`rel_type IS NULL OR rel_type NOT IN …`).
+@property (nonatomic, copy, nullable) NSSet<NSString *> *excludedRelTypes;
 /// Только эта строка (точечное чтение).
 @property (nonatomic, copy, nullable) NSString *eventId;
 
