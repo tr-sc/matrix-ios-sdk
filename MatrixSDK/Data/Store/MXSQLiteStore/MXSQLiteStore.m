@@ -148,12 +148,17 @@ static NSString *gKeychainAccessGroup;
         // Компоненты живут с самого начала: до open база nil, чтение пустое — как у MXFileStore до загрузки.
         MXSQLiteOutgoingStore *outgoing = [[MXSQLiteOutgoingStore alloc] initWithContext:_context];
         _context.outgoing = outgoing;
+        // Сводки (iP5) — компонент без маршрутов: протокол `MXRoomSummaryStore` отдельный, а запись идёт в общей
+        // транзакции коммита вместе с событиями и токеном синка.
+        MXSQLiteRoomSummaryStore *summaries = [[MXSQLiteRoomSummaryStore alloc] initWithContext:_context];
+        _roomSummaryStore = summaries;
         _components = @[
             [[MXSQLiteEventStore alloc] initWithContext:_context],
             [[MXSQLiteStateStore alloc] initWithContext:_context],
             [[MXSQLiteMetaStore alloc] initWithContext:_context],
             [[MXSQLiteReceiptStore alloc] initWithContext:_context],
             outgoing,
+            summaries,
         ];
         _routes = [MXSQLiteStore routesForComponents:_components];
     }
@@ -240,11 +245,6 @@ static NSString *gKeychainAccessGroup;
 {
     NSParameterAssert(credentials.userId);
     self.context.credentials = credentials;
-    if (!_roomSummaryStore)
-    {
-        // До iP5 сводки остаются в CoreData (отдельный протокол, переход прозрачен).
-        _roomSummaryStore = [[MXCoreDataRoomSummaryStore alloc] initWithCredentials:credentials];
-    }
 
     id<MXBackgroundModeHandler> handler = [MXSDKOptions sharedInstance].backgroundModeHandler;
     id<MXBackgroundTask> backgroundTask = [handler startBackgroundTaskWithName:@"[MXSQLiteStore] openWithCredentials"];
@@ -663,8 +663,7 @@ static NSString *gKeychainAccessGroup;
 
 - (NSArray<id<MXRoomSummaryProtocol>> *)summariesOrderedByActivity:(NSUInteger)limit
 {
-    // iP5: `MXSQLiteRoomSummaryStore` и запрос по `summary_activity`. До него CoreData не умеет «первые N».
-    return @[];
+    return [(MXSQLiteRoomSummaryStore *)_roomSummaryStore summariesOrderedByActivity:limit];
 }
 
 @end

@@ -24,6 +24,8 @@
 #import "MXEventRelations.h"
 
 #import "MXRealmAggregationsStore.h"
+#import "MXSQLiteAggregationsStore.h"
+#import "MXSQLiteStore.h"
 #import "MXAggregatedReactionsUpdater.h"
 #import "MXAggregatedEditsUpdater.h"
 #import "MXAggregatedReferencesUpdater.h"
@@ -235,6 +237,20 @@
 }
 
 
+#pragma mark - Store
+
++ (id<MXAggregationsStore>)aggregationsStoreForSessionStore:(id<MXStore>)store credentials:(MXCredentials *)credentials
+{
+    if ([store isKindOfClass:MXSQLiteStore.class])
+    {
+        // Реакции переезжают в базу стора без переноса: Realm — кеш, агрегаты придут с сервера заново.
+        [MXSQLiteAggregationsStore removeLegacyRealmStoreForUserId:credentials.userId];
+        return [[MXSQLiteAggregationsStore alloc] initWithStore:(MXSQLiteStore *)store];
+    }
+    return [[MXRealmAggregationsStore alloc] initWithCredentials:credentials];
+}
+
+
 #pragma mark - SDK-Private methods -
 
 - (instancetype)initWithMatrixSession:(MXSession *)mxSession
@@ -243,7 +259,8 @@
     if (self)
     {
         self.mxSession = mxSession;
-        self.store = [[MXRealmAggregationsStore alloc] initWithCredentials:mxSession.matrixRestClient.credentials];
+        self.store = [MXAggregations aggregationsStoreForSessionStore:mxSession.store
+                                                          credentials:mxSession.matrixRestClient.credentials];
 
         self.aggregatedReactionsUpdater = [[MXAggregatedReactionsUpdater alloc] initWithMatrixSession:self.mxSession aggregationStore:self.store];
         self.aggregatedEditsUpdater = [[MXAggregatedEditsUpdater alloc] initWithMatrixSession:self.mxSession
