@@ -105,7 +105,7 @@ public enum MXBackgroundSyncServiceError: Error {
         restClient.completionQueue = processingQueue
         self.restClient = restClient
         
-        store = MXBackgroundStore(withCredentials: credentials)
+        store = MXBackgroundSyncService.makeStore(credentials: credentials)
         
         MXLog.debug("[MXBackgroundSyncService] init: constructing crypto")
         crypto = MXBackgroundCryptoV2(credentials: credentials, restClient: restClient)
@@ -116,6 +116,42 @@ public enum MXBackgroundSyncServiceError: Error {
         syncPushRuleManagerWithAccountData()
     }
     
+    /// Стор NSE. Если у аккаунта есть база `MXSQLiteStore` (стор сессии приложения — SQLite, iP9), NSE читает её
+    /// же (тот же ключ из общего Keychain, файл в app group) и кладёт туда события пушей; иначе — старый путь по
+    /// файлам MXFileStore.
+    static func makeStore(credentials: MXCredentials) -> MXStore {
+        if let userId = credentials.userId, MXSQLiteStore.hasDatabase(forUserId: userId, rootDirectory: nil) {
+            let keyProvider = MXSQLiteKeychainKeyProvider(accessGroup: MXSQLiteStore.keychainAccessGroup)
+            let store = MXSQLiteStore(forExtensionWithKeyProvider: keyProvider, rootDirectory: nil)
+            do {
+                try store.openSynchronously(with: credentials)
+                MXLog.debug("[MXBackgroundSyncService] makeStore: MXSQLiteStore")
+                return store
+            } catch {
+                MXLog.warning("[MXBackgroundSyncService] makeStore: MXSQLiteStore did not open, using MXFileStore files", context: error)
+            }
+        }
+        return MXBackgroundStore(withCredentials: credentials)
+    }
+
+    /// Событие пуша — в ленту SQLite-базы одной строкой между дырами (dP11): чат, открытый из пуша, показывает его
+    /// без сети, а синк потом заменит строку на месте. Без SQLite-базы, без `trsc.count` или для незнакомой
+    /// комнаты — ничего не делает. Звать с `processingQueue` или из NSE после получения события.
+    @discardableResult
+    public func storePushEvent(_ event: MXEvent, inRoom roomId: String) -> Bool {
+        guard let sqliteStore = store as? MXSQLiteStore, event.hasTrscOrder else {
+            return false
+        }
+        do {
+            try sqliteStore.insertPushEvent(event, inRoom: roomId)
+            MXLog.debug("[MXBackgroundSyncService] storePushEvent: stored \(String(describing: event.eventId))")
+            return true
+        } catch {
+            MXLog.debug("[MXBackgroundSyncService] storePushEvent: skipped \(String(describing: event.eventId)): \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// Fetch event with given event and room identifiers. It performs a sync if the event not found in session store,
     /// and falls back to the /event API when there is nothing to sync from (the main application uses Sliding Sync,
     /// which never stores a /sync token).
@@ -479,7 +515,10 @@ public enum MXBackgroundSyncServiceError: Error {
                             
                             //  cache this event
                             self.cachedEvents[eventId] = event
-                            
+
+                            // TRSC dP11: /event отдаёт `trsc.count` — событие встаёт в ленту базы до синка.
+                            self.storePushEvent(event, inRoom: roomId)
+
                             //  handle encryption for this event
                             handleEncryption(forEvent: event)
                             
@@ -510,18 +549,18 @@ public enum MXBackgroundSyncServiceError: Error {
             }
             let lookup = await self.crypto.importRoomKeyFromBackup(for: event)
             if lookup == .imported, self.decryptIfPossible(event) {
-                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: Decrypted \(event.eventId ?? "") with a key from the key backup, attempt \(attempt)")
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: Decrypted \(String(describing: event.eventId)) with a key from the key backup, attempt \(attempt)")
                 completion(true)
                 return
             }
             //  no backup key, a replaced backup: waiting would only hold up the pushes queued behind this one
             guard lookup == .notYetAvailable else {
-                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: The key backup cannot decrypt \(event.eventId ?? ""), not retrying")
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: The key backup cannot decrypt \(String(describing: event.eventId)), not retrying")
                 completion(false)
                 return
             }
             if let missKey = MXBackgroundSyncService.keyBackupMissKey(for: event), self.keyBackupMisses.contains(missKey) {
-                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: An earlier push already waited for the session of \(event.eventId ?? ""), not retrying")
+                MXLog.debug("[MXBackgroundSyncService] decryptUsingKeyBackup: An earlier push already waited for the session of \(String(describing: event.eventId)), not retrying")
                 completion(false)
                 return
             }
@@ -657,6 +696,12 @@ public enum MXBackgroundSyncServiceError: Error {
     }
     
     private func updateBackgroundServiceStoresIfNeeded() {
+        if store is MXSQLiteStore {
+            // База общая с приложением и читается живьём: пересоздавать стор незачем. NSE под Sliding Sync сам не
+            // синкает, так что сверять токены с кешем ответов синка тоже не с чем.
+            syncPushRuleManagerWithAccountData()
+            return
+        }
         var outdatedStore = false
         
         // Check self.store data is in-sync with MXSession store data

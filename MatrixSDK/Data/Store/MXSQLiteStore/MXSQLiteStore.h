@@ -9,8 +9,13 @@
 #import "MXSQLiteKeyProvider.h"
 
 @class MXSQLiteDatabase;
+@class MXCredentials;
+@class MXEvent;
 
 NS_ASSUME_NONNULL_BEGIN
+
+/// Сколько NSE ждёт писателя приложения (`PRAGMA busy_timeout` стора расширения).
+FOUNDATION_EXPORT NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds;
 
 /**
  Хранилище сессии на SQLCipher «события + дыры» (ADR-0022). Одна база на аккаунт:
@@ -35,6 +40,15 @@ NS_ASSUME_NONNULL_BEGIN
                       rootDirectory:(nullable NSURL *)rootDirectory
                            readOnly:(BOOL)readOnly NS_DESIGNATED_INITIALIZER;
 
+/**
+ Стор NSE (iP9): та же база аккаунта в app group и тот же ключ из Keychain. Открывает только существующий файл
+ (ключ не создаёт, базу не пересоздаёт, схему не трогает — чужая версия схемы = ошибка открытия). Писатель есть,
+ но `commit` / `flush` ничего не пишут: на диск попадает только `insertPushEvent:inRoom:error:`. Ожидание
+ писателя приложения — не дольше `MXSQLiteExtensionBusyTimeoutMilliseconds`, потом отказ (пуш показывается и так).
+ */
+- (instancetype)initForExtensionWithKeyProvider:(id<MXSQLiteKeyProviding>)keyProvider
+                                  rootDirectory:(nullable NSURL *)rootDirectory;
+
 /// Группа Keychain ключей для `init`. nil — группа по умолчанию (у приложения и RiotNSE она общая).
 @property (class, nonatomic, copy, nullable) NSString *keychainAccessGroup;
 
@@ -52,7 +66,29 @@ NS_ASSUME_NONNULL_BEGIN
               rootDirectory:(nullable NSURL *)rootDirectory
                 keyProvider:(id<MXSQLiteKeyProviding>)keyProvider;
 
+/// Есть ли база аккаунта. Приложение держит правило: база есть ⇔ стор сессии — SQLite (`MXSQLiteSessionStore`);
+/// по нему NSE выбирает стор без флага приложения.
++ (BOOL)hasDatabaseForUserId:(NSString *)userId rootDirectory:(nullable NSURL *)rootDirectory;
+
 @property (nonatomic, readonly) BOOL readOnly;
+/// Стор NSE (`initForExtensionWithKeyProvider:rootDirectory:`).
+@property (nonatomic, readonly) BOOL extensionMode;
+
+/// Состояние Sliding Sync сессии: пишется до `commit` ответа и попадает в ту же транзакцию, что его события
+/// (у MXFileStore оно в NSUserDefaults после коммита). Реализует компонент меты.
+@property (nonatomic, copy, nullable) NSDictionary *trscSlidingSyncState;
+
+/// Открыть на вызывающем потоке (NSE: процесс короткий, стор нужен сразу). Не звать с main приложения.
+- (BOOL)openSynchronouslyWithCredentials:(MXCredentials *)credentials error:(NSError **)error;
+
+/**
+ Событие из пуша — одной строкой между дырами (`insertDetachedEvent:inRoom:`) и сразу на диск отдельной короткой
+ транзакцией. Синк потом закрывает дыры по `noteSyncTimelineInRoom:…` и заменяет строку на месте (ключ — event_id).
+ NO и `error`: стор не открыт, комнаты нет в базе (без её состояния чат не откроется), нет `trsc.count`, событие
+ уже есть, писатель занят дольше busy_timeout.
+ */
+- (BOOL)insertPushEvent:(MXEvent *)event inRoom:(NSString *)roomId error:(NSError **)error
+    NS_SWIFT_NAME(insertPushEvent(_:inRoom:));
 /// nil до открытия и после `close` / `deleteAllData`.
 @property (nonatomic, readonly, nullable) MXSQLiteDatabase *database;
 

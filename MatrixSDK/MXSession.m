@@ -31,6 +31,7 @@
 #import "MXNoStore.h"
 #import "MXMemoryStore.h"
 #import "MXFileStore.h"
+#import "MXSQLiteStore.h"
 
 #import "MXDecryptionResult.h"
 
@@ -1143,25 +1144,51 @@ typedef void (^MXOnResumeDone)(void);
     return MXSlidingSyncPersistenceKey(self.credentials);
 }
 
-- (void)persistSlidingSyncState
+- (NSDictionary *)slidingSyncStateWithPosition:(NSString *)position connectionId:(NSString *)connectionId toDevicePosition:(NSString *)toDevicePosition
 {
-    if (!self.slidingSyncPosition.length) return;
-    NSDictionary *state = @{
-        @"position": self.slidingSyncPosition,
-        @"connectionId": self.slidingSyncConnectionId ?: @"",
-        @"toDevicePosition": self.slidingSyncToDevicePosition ?: @"",
+    return @{
+        @"position": position,
+        @"connectionId": connectionId ?: @"",
+        @"toDevicePosition": toDevicePosition ?: @"",
         @"roomOrder": self.slidingSyncRoomOrder ?: @[],
         @"bumpStamps": self.slidingSyncBumpStamps ?: @{},
         @"total": @(self.slidingSyncTotalRoomCount),
         @"excludedRoomIds": self.slidingSyncExcludedRoomIds.allObjects ?: @[],
         @"needsListRefresh": @(self.slidingSyncNeedsListRefresh)
     };
+}
+
+/// TRSC ADR-0022: on `MXSQLiteStore` the Sliding Sync state goes into the store before the response's commit, so the
+/// position and the response's events land in one transaction. NSUserDefaults keeps the copy MXFileStore relies on.
+- (void)stageSlidingSyncStateInStoreWithPosition:(NSString *)position connectionId:(NSString *)connectionId toDevicePosition:(NSString *)toDevicePosition
+{
+    if (!position.length || ![self.store isKindOfClass:MXSQLiteStore.class]) return;
+    ((MXSQLiteStore *)self.store).trscSlidingSyncState = [self slidingSyncStateWithPosition:position connectionId:connectionId toDevicePosition:toDevicePosition];
+}
+
+- (void)persistSlidingSyncState
+{
+    if (!self.slidingSyncPosition.length) return;
+    NSDictionary *state = [self slidingSyncStateWithPosition:self.slidingSyncPosition
+                                                connectionId:self.slidingSyncConnectionId
+                                            toDevicePosition:self.slidingSyncToDevicePosition];
     [NSUserDefaults.standardUserDefaults setObject:state forKey:self.slidingSyncPersistenceKey];
+    if ([self.store isKindOfClass:MXSQLiteStore.class])
+    {
+        // The fields set after the commit (to-device position) reach the database with the next commit.
+        ((MXSQLiteStore *)self.store).trscSlidingSyncState = state;
+    }
 }
 
 - (void)restoreSlidingSyncStateWithConfiguration:(MXSlidingSyncConfiguration *)configuration
 {
     NSDictionary *persisted = [NSUserDefaults.standardUserDefaults dictionaryForKey:self.slidingSyncPersistenceKey];
+    if ([self.store isKindOfClass:MXSQLiteStore.class])
+    {
+        // Written in the same transaction as the data it describes: never ahead of the store, unlike NSUserDefaults.
+        // A new database has none, so the old store's position is not reused.
+        persisted = ((MXSQLiteStore *)self.store).trscSlidingSyncState;
+    }
     if (persisted && self.store.roomSummaryStore.countOfRooms == 0)
     {
         // A cache clear must not resurrect a stale server position/order from
@@ -2508,6 +2535,10 @@ static NSNumber *MXSlidingSyncBumpStampForRoom(NSDictionary *room, NSString *mem
                         }
                     }
                     if (requestedNextRoomIds.count) [self.trscNextRequestRoomIds minusSet:requestedNextRoomIds];
+                    NSString *stagedToDevicePosition = response.extensions[@"to_device"][@"next_batch"];
+                    [self stageSlidingSyncStateInStoreWithPosition:response.position
+                                                      connectionId:request[@"conn_id"]
+                                                  toDevicePosition:stagedToDevicePosition.length ? stagedToDevicePosition : self.slidingSyncToDevicePosition];
                 } storeCompletion:^{
                     if (!self->eventStreamRequest || ![self.slidingSyncRequestIdentifier isEqual:requestIdentifier]) return;
                     self.slidingSyncConnectionId = request[@"conn_id"];

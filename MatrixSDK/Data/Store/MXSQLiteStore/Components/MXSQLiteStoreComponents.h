@@ -123,6 +123,9 @@
 /// Одноразовый перенос черновиков и исходящих из MXFileStore уже сделан (`MXSQLiteLegacyImport`).
 @property (nonatomic) BOOL legacyFileStoreImported;
 
+/// Состояние Sliding Sync (позиция, conn_id, порядок комнат) — в той же транзакции, что данные ответа (iP9).
+@property (nonatomic, copy) NSDictionary * _Nullable trscSlidingSyncState;
+
 - (void)storeHomeserverWellknown:(nonnull MXWellKnown*)homeserverWellknown;
 - (void)storeHomeserverCapabilities:(nonnull MXCapabilities*)homeserverCapabilities;
 - (void)storeSupportedMatrixVersions:(nonnull MXMatrixVersions*)supportedMatrixVersions;
