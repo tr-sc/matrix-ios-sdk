@@ -158,4 +158,21 @@ final class MXTrscStoreMetricsTests: XCTestCase {
         harness.commit()
         XCTAssertEqual(sink.events.filter { $0.name == "sync_persist_ms" }.count, 1)
     }
+
+    // MARK: - Open outcome (#1011)
+
+    func testOpenOutcomeIsOneJournalLine() {
+        let store = MXSQLiteStore(keyProvider: MXSQLiteMemoryKeyProvider(), rootDirectory: FileManager.default.temporaryDirectory, readOnly: true)
+        MXTrscStoreMetrics.shared.store(store, didResetWithReason: "key_rejected")
+        MXTrscStoreMetrics.shared.store(store, didFailToOpenWithReason: "transient")
+        MXTrscStoreMetrics.shared.store(store, didFailToOpenWithReason: "cipher_unavailable")
+
+        XCTAssertEqual(sink.events.map(\.name), ["store_reset", "store_open_failed", "store_open_failed"])
+        XCTAssertEqual(sink.events.map(\.detail), [
+            "reason=key_rejected store=sqlite",
+            "reason=transient retry=next_launch store=sqlite",
+            "reason=cipher_unavailable retry=none store=sqlite",
+        ])
+    }
 }
+

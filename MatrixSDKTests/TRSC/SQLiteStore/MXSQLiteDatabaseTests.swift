@@ -17,6 +17,8 @@ final class MXSQLiteDatabaseTests: XCTestCase {
 
     override func tearDown() {
         MXSQLiteDatabase.setCipherVersionQueryForTesting(nil)
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting(nil)
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(nil)
         sandbox.remove()
         super.tearDown()
     }
@@ -126,6 +128,126 @@ final class MXSQLiteDatabaseTests: XCTestCase {
         XCTAssertThrowsError(try sandbox.open(material: wrongSalt)) { error in
             XCTAssertEqual((error as NSError).code, MXSQLiteError.Code.keyRejected.rawValue)
         }
+    }
+
+    // MARK: - SQLITE_NOMEM: memory or a foreign key (#1011)
+
+    private let noMemory = NSNumber(value: 7) // SQLITE_NOMEM
+
+    private func assertErrorCode(_ code: MXSQLiteError.Code, resultCode: Int? = nil, _ body: () throws -> Void,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try body(), file: file, line: line) { error in
+            let error = error as NSError
+            XCTAssertEqual(error.domain, MXSQLiteErrorDomain, file: file, line: line)
+            XCTAssertEqual(error.code, code.rawValue, "\(error)", file: file, line: line)
+            if let resultCode {
+                XCTAssertEqual(error.userInfo[MXSQLiteErrorResultCodeKey] as? Int, resultCode, file: file, line: line)
+            }
+        }
+    }
+
+    func testNoMemoryOnKeyCheckIsRetriedOnce() throws {
+        let material = try sandbox.material()
+        let database = try sandbox.openWithSchema(material: material)
+        try insertMarker(database, rows: 3)
+        database.close()
+
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting([noMemory])
+        let reopened = try sandbox.open(material: material)
+        XCTAssertEqual(reopened.readValue { $0.scalarInt("SELECT count(*) FROM meta") }, 3, "the retry opened the database")
+        reopened.close()
+    }
+
+    func testPersistentNoMemoryWithTheRightKeyIsTransient() throws {
+        let material = try sandbox.material()
+        let database = try sandbox.openWithSchema(material: material)
+        try insertMarker(database, rows: 3)
+        database.checkpoint(.truncate)
+        database.close()
+        let before = try XCTUnwrap(FileManager.default.contents(atPath: sandbox.databaseURL.path))
+
+        // Обе попытки писателя падают как при нехватке памяти, а HMAC страницы 1 ключом сходится.
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting([noMemory, noMemory])
+        assertErrorCode(.transient, resultCode: 7) { _ = try sandbox.open(material: material) }
+        XCTAssertEqual(FileManager.default.contents(atPath: sandbox.databaseURL.path), before, "the file is untouched")
+
+        // Память вернулась: та же база открывается тем же ключом.
+        let reopened = try sandbox.open(material: material)
+        XCTAssertEqual(reopened.readValue { $0.scalarInt("SELECT count(*) FROM meta") }, 3)
+        reopened.close()
+    }
+
+    func testForeignKeyOnAFileWithDataIsRejectedNotTransient() throws {
+        // На 4.10 чужой ключ с открытым заголовком приходит как SQLITE_NOMEM — его решает HMAC страницы 1.
+        let database = try sandbox.openWithSchema()
+        try insertMarker(database, rows: 20)
+        database.checkpoint(.truncate)
+        database.close()
+
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        let other = try sandbox.keys.keyMaterial(forIdentifier: "other", create: true)
+        assertErrorCode(.keyRejected) { _ = try sandbox.open(material: other) }
+    }
+
+    func testForeignKeyWithDataStillInTheWalIsRejected() throws {
+        let database = try sandbox.openWithSchema()
+        try insertMarker(database, rows: 5)
+        database.close()
+
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        let other = try sandbox.keys.keyMaterial(forIdentifier: "other", create: true)
+        assertErrorCode(.keyRejected) { _ = try sandbox.open(material: other) }
+    }
+
+    func testDamagedFileIsRejected() throws {
+        let material = try sandbox.material()
+        let database = try sandbox.openWithSchema(material: material)
+        try insertMarker(database, rows: 20)
+        database.checkpoint(.truncate)
+        database.close()
+
+        // Первая страница испорчена за открытым заголовком.
+        let handle = try FileHandle(forWritingTo: sandbox.databaseURL)
+        try handle.seek(toOffset: 64)
+        handle.write(Data(repeating: 0xa5, count: 512))
+        try handle.close()
+
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        assertErrorCode(.keyRejected) { _ = try sandbox.open(material: material) }
+    }
+
+    // MARK: - Backup
+
+    private func isExcludedFromBackup(_ url: URL) throws -> Bool {
+        var fresh = url
+        fresh.removeAllCachedResourceValues()
+        return try fresh.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup ?? false
+    }
+
+    func testDatabaseFolderAndFilesAreExcludedFromBackup() throws {
+        let database = try sandbox.openWithSchema()
+        try insertMarker(database, rows: 3)
+
+        let base = sandbox.databaseURL
+        let wal = URL(fileURLWithPath: base.path + "-wal")
+        let shm = URL(fileURLWithPath: base.path + "-shm")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: wal.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: shm.path))
+        XCTAssertTrue(try isExcludedFromBackup(base.deletingLastPathComponent()), "the folder covers -wal, -shm and anything later")
+        XCTAssertTrue(try isExcludedFromBackup(base))
+        XCTAssertTrue(try isExcludedFromBackup(wal))
+        XCTAssertTrue(try isExcludedFromBackup(shm))
+        database.close()
+    }
+
+    func testFolderIsExcludedFromBackupEvenWhenTheOpenFails() throws {
+        MXSQLiteDatabase.setCipherVersionQueryForTesting("SELECT ''")
+        let folder = sandbox.directory.appendingPathComponent("account", isDirectory: true)
+        let url = folder.appendingPathComponent("store.sqlite")
+        XCTAssertThrowsError(try sandbox.open(url))
+        XCTAssertTrue(try isExcludedFromBackup(folder))
     }
 
     func testInvalidKeyLengthIsRejected() {

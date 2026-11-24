@@ -18,6 +18,8 @@ final class MXSQLiteStoreFacadeTests: XCTestCase {
     }
 
     override func tearDown() {
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting(nil)
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(nil)
         sandbox.remove()
         super.tearDown()
     }
@@ -141,12 +143,77 @@ final class MXSQLiteStoreFacadeTests: XCTestCase {
         MXSQLiteDatabase.setCipherVersionQueryForTesting("SELECT ''")
         defer { MXSQLiteDatabase.setCipherVersionQueryForTesting(nil) }
 
+        let metrics = MetricsRecorder()
         let second = makeStore()
+        second.metricsDelegate = metrics
         XCTAssertThrowsError(try open(second)) { error in
             XCTAssertEqual((error as NSError).code, MXSQLiteError.Code.cipherUnavailable.rawValue)
         }
         XCTAssertNil(second.database)
         XCTAssertEqual(FileManager.default.contents(atPath: url.path), before, "fail-closed must not wipe the store")
+        XCTAssertEqual(metrics.resets, [])
+        XCTAssertEqual(metrics.failures, ["cipher_unavailable"])
+    }
+
+    func testNoMemoryOnOpenKeepsTheFileAndTheKey() throws {
+        let first = makeStore()
+        try open(first)
+        try first.database?.write { connection in
+            try connection.run("INSERT INTO meta (key, value) VALUES ('event_stream_token', 's9')", bind: nil)
+        }
+        first.database?.checkpoint(.truncate)
+        first.close()
+        let url = MXSQLiteStore.databaseURL(forUserId: userId, rootDirectory: sandbox.directory)
+        let before = try XCTUnwrap(FileManager.default.contents(atPath: url.path))
+        let identifier = MXSQLiteStore.keyIdentifier(forUserId: userId)
+        let key = try sandbox.keys.keyMaterial(forIdentifier: identifier, create: false).key
+
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting([NSNumber(value: 7), NSNumber(value: 7)])
+        let metrics = MetricsRecorder()
+        let second = makeStore()
+        second.metricsDelegate = metrics
+        XCTAssertThrowsError(try open(second)) { error in
+            XCTAssertTrue(MXSQLiteStore.isTransientOpenError(error))
+        }
+        XCTAssertNil(second.database)
+        XCTAssertEqual(FileManager.default.contents(atPath: url.path), before, "a transient failure must not wipe the store")
+        XCTAssertEqual(try sandbox.keys.keyMaterial(forIdentifier: identifier, create: false).key, key, "nor its key")
+        XCTAssertEqual(metrics.resets, [])
+        XCTAssertEqual(metrics.failures, ["transient"])
+
+        // Следующий запуск: память есть, база та же.
+        let third = makeStore()
+        try open(third)
+        XCTAssertEqual(third.database?.readValue { $0.scalarText("SELECT value FROM meta WHERE key = 'event_stream_token'") }, "s9")
+        third.close()
+    }
+
+    func testForeignKeyStillRecreatesTheStore() throws {
+        let first = makeStore()
+        try open(first)
+        try first.database?.write { connection in
+            try connection.run("INSERT INTO meta (key, value) VALUES ('event_stream_token', 's9')", bind: nil)
+        }
+        first.database?.checkpoint(.truncate)
+        first.close()
+
+        // Сброс Keychain: под тем же идентификатором уже другой ключ.
+        let identifier = MXSQLiteStore.keyIdentifier(forUserId: userId)
+        let oldKey = try sandbox.keys.keyMaterial(forIdentifier: identifier, create: false).key
+        sandbox.keys.removeKeyMaterial(forIdentifier: identifier)
+        _ = try sandbox.keys.keyMaterial(forIdentifier: identifier, create: true)
+
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        let metrics = MetricsRecorder()
+        let second = makeStore()
+        second.metricsDelegate = metrics
+        try open(second)
+        XCTAssertEqual(metrics.resets, ["key_rejected"])
+        XCTAssertEqual(metrics.failures, [])
+        XCTAssertEqual(second.database?.readValue { $0.scalarInt("SELECT count(*) FROM meta") }, 0)
+        XCTAssertNotEqual(try sandbox.keys.keyMaterial(forIdentifier: identifier, create: false).key, oldKey)
+        second.close()
     }
 
     func testReadOnlyStoreNeedsAnExistingFile() throws {
@@ -222,6 +289,12 @@ private final class MetricsRecorder: NSObject, MXStoreMetricsDelegate {
     private let lock = NSLock()
     private var _resets: [String] = []
     private var _opens = 0
+    private var _failures: [String] = []
+    var failures: [String] { lock.lock(); defer { lock.unlock() }; return _failures }
+
+    func store(_ store: MXStore, didFailToOpenWithReason reason: String) {
+        lock.lock(); _failures.append(reason); lock.unlock()
+    }
 
     var resets: [String] { lock.lock(); defer { lock.unlock() }; return _resets }
     var opens: Int { lock.lock(); defer { lock.unlock() }; return _opens }

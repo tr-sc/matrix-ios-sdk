@@ -4,6 +4,7 @@
 //
 
 #import "MXSQLiteDatabase.h"
+#import "MXSQLiteDatabase+Testing.h"
 
 #import <SQLCipher/sqlite3.h>
 #import <dlfcn.h>
@@ -357,6 +358,11 @@ static NSString *MXSQLiteHandleMessage(sqlite3 *handle)
 static void *MXSQLiteWriterQueueKey = &MXSQLiteWriterQueueKey;
 static NSString *const kMXSQLiteCipherVersionQuery = @"PRAGMA cipher_version;";
 static NSString *gMXSQLiteCipherVersionQuery;
+/// Очередь подменённых кодов проверочного чтения (тесты, `+Testing.h`). Под `@synchronized (MXSQLiteDatabase.class)`.
+static NSMutableArray<NSNumber *> *gMXSQLiteKeyCheckResultCodes;
+static NSNumber *gMXSQLiteNoMemoryRetryDelay;
+/// Пауза перед повтором проверочного чтения после SQLITE_NOMEM: дать системе освободить память.
+static useconds_t const kMXSQLiteNoMemoryRetryDelayMicroseconds = 150 * 1000;
 
 @interface MXSQLiteDatabase ()
 {
@@ -398,6 +404,8 @@ static NSString *gMXSQLiteCipherVersionQuery;
     {
         NSURL *directory = url.URLByDeletingLastPathComponent;
         [NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:nil];
+        // До первого байта базы: -wal и -shm не должны успеть попасть в бэкап даже при неудачном открытии.
+        [self excludeFromBackupDirectoryOfURL:url];
     }
 
     // Ключ живёт в этом буфере только на время открытия и затирается в конце.
@@ -504,7 +512,8 @@ typedef NS_ENUM(NSInteger, MXSQLiteRole)
     return spec;
 }
 
-+ (MXSQLiteConnection *)openConnectionAtURL:(NSURL *)url keySpec:(NSData *)keySpec role:(MXSQLiteRole)role error:(NSError **)error
+/// Соединение с ключом и открытым заголовком, ключ ещё не проверен чтением.
++ (MXSQLiteConnection *)keyedConnectionAtURL:(NSURL *)url keySpec:(NSData *)keySpec role:(MXSQLiteRole)role error:(NSError **)error
 {
     BOOL readOnly = role == MXSQLiteRoleReadOnly;
     int flags = SQLITE_OPEN_NOMUTEX | (readOnly ? SQLITE_OPEN_READONLY : (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE));
@@ -561,23 +570,132 @@ typedef NS_ENUM(NSInteger, MXSQLiteRole)
         }
         return nil;
     }
+    return connection;
+}
 
-    // Ключ проверяется только чтением страницы: на пустом файле подходит любой.
-    rc = sqlite3_exec(handle, "SELECT count(*) FROM sqlite_master;", NULL, NULL, NULL);
+/// Проверочное чтение: ключ проверяется только чтением страницы, на пустом файле подходит любой.
++ (int)checkKeyOfConnection:(MXSQLiteConnection *)connection
+{
+    NSNumber *injected;
+    @synchronized (MXSQLiteDatabase.class)
+    {
+        injected = gMXSQLiteKeyCheckResultCodes.firstObject;
+        if (injected)
+        {
+            [gMXSQLiteKeyCheckResultCodes removeObjectAtIndex:0];
+        }
+    }
+    if (injected.intValue != SQLITE_OK)
+    {
+        return injected.intValue;
+    }
+    return sqlite3_exec(connection->_handle, "SELECT count(*) FROM sqlite_master;", NULL, NULL, NULL);
+}
+
+static int MXSQLiteCollectRow(void *context, int columns, char **values, char **names)
+{
+    NSMutableArray<NSString *> *rows = (__bridge NSMutableArray<NSString *> *)context;
+    if (columns > 0 && values[0])
+    {
+        [rows addObject:[NSString stringWithUTF8String:values[0]]];
+    }
+    return SQLITE_OK;
+}
+
+/**
+ Чужой ключ или память? Оба приходят из проверочного чтения как SQLITE_NOMEM: с открытым заголовком SQLCipher 4.10
+ читает заголовок, а неудачную расшифровку первой страницы пейджер отдаёт как SQLITE_NOMEM (CODEC2 →
+ SQLITE_NOMEM_BKPT). Различает `PRAGMA cipher_integrity_check` на свежем соединении: он читает страницы с диска мимо
+ пейджера и сверяет HMAC ключом. «HMAC verification failed for page 1» — ключ не подходит к файлу (или страница 1
+ испорчена) → пересоздавать. Пусто или сама проверка не прошла — ключ свой, это была память → не трогать.
+
+ Проверка читает весь файл по странице на один буфер, памяти почти не берёт и идёт только на этом редком пути.
+ */
++ (BOOL)pageOneFailsHMACAtURL:(NSURL *)url keySpec:(NSData *)keySpec role:(MXSQLiteRole)role
+{
+    MXSQLiteConnection *probe = [self keyedConnectionAtURL:url keySpec:keySpec role:role error:nil];
+    if (!probe)
+    {
+        return NO;
+    }
+    NSMutableArray<NSString *> *rows = [NSMutableArray array];
+    int rc = sqlite3_exec(probe->_handle, "PRAGMA cipher_integrity_check;", MXSQLiteCollectRow, (__bridge void *)rows, NULL);
+    [probe closeHandle];
     if (rc != SQLITE_OK)
     {
-        NSString *message = MXSQLiteHandleMessage(handle);
+        MXLogWarning(@"[MXSQLiteDatabase] cipher_integrity_check failed: %d", rc);
+        return NO;
+    }
+    for (NSString *row in rows)
+    {
+        if ([row isEqualToString:@"HMAC verification failed for page 1"])
+        {
+            return YES;
+        }
+    }
+    return NO;
+}
+
++ (MXSQLiteConnection *)openConnectionAtURL:(NSURL *)url keySpec:(NSData *)keySpec role:(MXSQLiteRole)role error:(NSError **)error
+{
+    MXSQLiteConnection *connection = [self keyedConnectionAtURL:url keySpec:keySpec role:role error:error];
+    if (!connection)
+    {
+        return nil;
+    }
+
+    int rc = [self checkKeyOfConnection:connection];
+    if (rc == SQLITE_NOMEM)
+    {
+        // Один повтор на свежем соединении: неудачная расшифровка навсегда ломает кодек соединения, а настоящая
+        // нехватка памяти за паузу может пройти.
+        [connection closeHandle];
+        useconds_t delay = kMXSQLiteNoMemoryRetryDelayMicroseconds;
+        @synchronized (MXSQLiteDatabase.class)
+        {
+            if (gMXSQLiteNoMemoryRetryDelay)
+            {
+                delay = (useconds_t)(gMXSQLiteNoMemoryRetryDelay.doubleValue * 1000);
+            }
+        }
+        usleep(delay);
+        connection = [self keyedConnectionAtURL:url keySpec:keySpec role:role error:error];
+        if (!connection)
+        {
+            return nil;
+        }
+        rc = [self checkKeyOfConnection:connection];
+        if (rc == SQLITE_OK)
+        {
+            MXLogWarning(@"[MXSQLiteDatabase] key check passed on retry after SQLITE_NOMEM");
+        }
+    }
+    if (rc != SQLITE_OK)
+    {
+        NSString *message = MXSQLiteHandleMessage(connection->_handle);
         [connection closeHandle];
         if (error)
         {
-            // С открытым заголовком SQLCipher на чужом ключе отвечает не только SQLITE_NOTADB: заголовок читается,
-            // а расшифровка первой страницы падает как SQLITE_NOMEM (проверено на 4.10) или SQLITE_CORRUPT.
-            BOOL keyRejected = rc == SQLITE_NOTADB || rc == SQLITE_NOMEM || rc == SQLITE_CORRUPT;
-            *error = MXSQLiteMakeError(keyRejected ? MXSQLiteErrorKeyRejected : MXSQLiteErrorOpenFailed, rc, message);
+            MXSQLiteErrorCode code;
+            if (rc == SQLITE_NOTADB || rc == SQLITE_CORRUPT)
+            {
+                code = MXSQLiteErrorKeyRejected;
+            }
+            else if (rc == SQLITE_NOMEM)
+            {
+                // Чужой ключ на 4.10 тоже даёт SQLITE_NOMEM (см. pageOneFailsHMACAtURL:): решает HMAC страницы 1.
+                code = [self pageOneFailsHMACAtURL:url keySpec:keySpec role:role] ? MXSQLiteErrorKeyRejected : MXSQLiteErrorTransient;
+            }
+            else
+            {
+                code = MXSQLiteErrorOpenFailed;
+            }
+            *error = MXSQLiteMakeError(code, rc, message);
         }
         return nil;
     }
 
+    NSError *pragmaError;
     NSMutableArray<NSString *> *pragmas = [NSMutableArray arrayWithArray:@[
         @"PRAGMA temp_store = MEMORY;",
         @"PRAGMA mmap_size = 0;",
@@ -626,6 +744,22 @@ typedef NS_ENUM(NSInteger, MXSQLiteRole)
     }
 }
 
++ (void)setKeyCheckResultCodesForTesting:(NSArray<NSNumber *> *)codes
+{
+    @synchronized (MXSQLiteDatabase.class)
+    {
+        gMXSQLiteKeyCheckResultCodes = codes ? [codes mutableCopy] : nil;
+    }
+}
+
++ (void)setNoMemoryRetryDelayForTesting:(NSNumber *)milliseconds
+{
+    @synchronized (MXSQLiteDatabase.class)
+    {
+        gMXSQLiteNoMemoryRetryDelay = milliseconds;
+    }
+}
+
 + (NSString *)sqliteLibraryPath
 {
     Dl_info info;
@@ -649,9 +783,28 @@ typedef NS_ENUM(NSInteger, MXSQLiteRole)
             [fileManager setAttributes:attributes ofItemAtPath:path error:nil];
         }
     }
-    // Шифротекст без ключа (ключ ThisDeviceOnly) на новом устройстве бесполезен — в бэкап не кладём.
-    NSURL *resourceURL = url;
-    [resourceURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    // Шифротекст без ключа (ключ ThisDeviceOnly) на новом устройстве бесполезен — в бэкап не кладём. Признак на
+    // каталоге накрывает -wal и -shm (в них ещё не слитые коммиты) и всё, что появится в каталоге позже; на самом
+    // файле — на случай, если каталог когда-нибудь станет общим.
+    [self excludeFromBackupDirectoryOfURL:url];
+    for (NSString *suffix in @[@"", @"-wal", @"-shm"])
+    {
+        NSURL *fileURL = [NSURL fileURLWithPath:[url.path stringByAppendingString:suffix]];
+        if ([fileManager fileExistsAtPath:fileURL.path])
+        {
+            [fileURL setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+        }
+    }
+}
+
++ (void)excludeFromBackupDirectoryOfURL:(NSURL *)url
+{
+    NSURL *directory = url.URLByDeletingLastPathComponent;
+    NSError *error;
+    if (![directory setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:&error])
+    {
+        MXLogWarning(@"[MXSQLiteDatabase] database folder not excluded from backup: %@", error.localizedDescription);
+    }
 }
 
 #pragma mark Writing

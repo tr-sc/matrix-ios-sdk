@@ -70,6 +70,14 @@ FOUNDATION_EXPORT NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds;
 /// по нему NSE выбирает стор без флага приложения.
 + (BOOL)hasDatabaseForUserId:(NSString *)userId rootDirectory:(nullable NSURL *)rootDirectory;
 
+/// Отказ открытия временный (`MXSQLiteErrorTransient`: не хватило памяти, ключ свой): база и ключ целы, следующий
+/// холодный старт пробует снова.
++ (BOOL)isTransientOpenError:(nullable NSError *)error;
+
+/// Причина отказа открытия для метрик (`store_open_failed`): `transient`, `cipher_unavailable`, `key_unavailable`,
+/// `invalid_key`, `schema`, `key_rejected` (пересоздание не помогло), `open_failed`.
++ (NSString *)openFailureReasonForError:(nullable NSError *)error;
+
 @property (nonatomic, readonly) BOOL readOnly;
 /// Стор NSE (`initForExtensionWithKeyProvider:rootDirectory:`).
 @property (nonatomic, readonly) BOOL extensionMode;

@@ -254,6 +254,23 @@ static NSMutableArray<NSString *> *sLiveProbeOrder;
 
 #pragma mark - MXStoreMetricsDelegate
 
+// Одна строка журнала на исход открытия, по ней видно, что случилось с базой:
+// `store_reset reason=key_rejected` — пересоздана; `store_open_failed reason=transient retry=next_launch` — не
+// открылась от нехватки памяти, файл и ключ целы; `store_open_failed reason=cipher_unavailable retry=none` — отказ
+// без пересоздания.
+- (void)store:(id<MXStore>)store didResetWithReason:(NSString *)reason
+{
+    [MXTrscStoreMetrics event:@"store_reset" milliseconds:0
+                       detail:[NSString stringWithFormat:@"reason=%@ store=%@", reason, [MXTrscStoreMetrics kindOfStore:store]]];
+}
+
+- (void)store:(id<MXStore>)store didFailToOpenWithReason:(NSString *)reason
+{
+    NSString *retry = [reason isEqualToString:@"transient"] ? @"next_launch" : @"none";
+    [MXTrscStoreMetrics event:@"store_open_failed" milliseconds:0
+                       detail:[NSString stringWithFormat:@"reason=%@ retry=%@ store=%@", reason, retry, [MXTrscStoreMetrics kindOfStore:store]]];
+}
+
 - (void)store:(id<MXStore>)store didCommitInMilliseconds:(double)milliseconds events:(NSUInteger)events rooms:(NSUInteger)rooms
 {
     [sLock lock];

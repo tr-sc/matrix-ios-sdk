@@ -27,6 +27,10 @@ typedef NS_ERROR_ENUM(MXSQLiteErrorDomain, MXSQLiteErrorCode)
     MXSQLiteErrorSchema,
     /// База закрыта.
     MXSQLiteErrorClosed,
+    /// Временный отказ открытия: SQLite не хватило памяти на проверочное чтение, повтор тоже не прошёл, а HMAC
+    /// первой страницы ключом сходится — ключ свой. Базу не пересоздавать: файл и ключ целы, следующий запуск
+    /// пробует снова. `userInfo[MXSQLiteErrorResultCodeKey]` — `SQLITE_NOMEM`.
+    MXSQLiteErrorTransient,
 };
 
 /// Код результата SQLite (`NSNumber`) в `userInfo` ошибок `MXSQLiteErrorStatementFailed` и `MXSQLiteErrorOpenFailed`.
@@ -176,10 +180,6 @@ typedef BOOL (^MXSQLiteWriteBody)(MXSQLiteConnection *connection, NSError **erro
 
 /// Удалить файл базы и `-wal`, `-shm`, `-journal`. База должна быть закрыта.
 + (void)removeFilesAtURL:(NSURL *)url;
-
-/// Только для тестов fail-closed: запрос вместо `PRAGMA cipher_version;` (nil — вернуть обычный).
-/// `SELECT ''` изображает SQLite без SQLCipher.
-+ (void)setCipherVersionQueryForTesting:(nullable NSString *)query;
 
 /// Образ, в который разрешился `sqlite3_open_v2` при линковке MatrixSDK. Должен быть SQLCipher, а не MatrixSDKCrypto.
 @property (class, nonatomic, readonly) NSString *sqliteLibraryPath;

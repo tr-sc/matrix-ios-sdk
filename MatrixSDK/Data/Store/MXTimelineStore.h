@@ -121,6 +121,9 @@ FOUNDATION_EXPORT int64_t const MXRoomHoleOpenEnd;
 - (void)store:(id<MXStore>)store didFillHoleInMilliseconds:(double)milliseconds events:(NSUInteger)events roomId:(NSString *)roomId;
 /// База пересоздана (`reason`: `key_rejected`, `schema_mismatch`, `corrupt`, …).
 - (void)store:(id<MXStore>)store didResetWithReason:(NSString *)reason;
+/// База не открылась и не пересоздана, файл и ключ целы (`reason`: `transient` — следующий запуск пробует снова;
+/// `cipher_unavailable`, `key_unavailable`, … — `+[MXSQLiteStore openFailureReasonForError:]`).
+- (void)store:(id<MXStore>)store didFailToOpenWithReason:(NSString *)reason;
 @end
 
 /**

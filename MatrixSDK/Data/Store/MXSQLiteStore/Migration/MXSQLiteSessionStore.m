@@ -11,6 +11,8 @@
 #import "MatrixSDKSwiftHeader.h"
 
 static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed.";
+static NSString *const kTransientOpenFailureKeyPrefix = @"MXSQLiteSessionStore.transientOpenFailures.";
+NSInteger const MXSQLiteSessionStoreMaxTransientOpenFailures = 3;
 
 @interface MXSQLiteSessionStore ()
 @property (nonatomic, readwrite, nullable) MXSQLiteLegacyImportResult *legacyImportResult;
@@ -33,11 +35,41 @@ static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed
 + (void)clearOpenFailureForUserId:(NSString *)userId
 {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:[self openFailureKeyForUserId:userId]];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:[self transientOpenFailureKeyForUserId:userId]];
 }
 
 + (void)noteOpenFailureForUserId:(NSString *)userId
 {
     [NSUserDefaults.standardUserDefaults setBool:YES forKey:[self openFailureKeyForUserId:userId]];
+}
+
++ (NSString *)transientOpenFailureKeyForUserId:(NSString *)userId
+{
+    return [kTransientOpenFailureKeyPrefix stringByAppendingString:[MXSQLiteStore keyIdentifierForUserId:userId]];
+}
+
++ (NSInteger)transientOpenFailureCountForUserId:(NSString *)userId
+{
+    return [NSUserDefaults.standardUserDefaults integerForKey:[self transientOpenFailureKeyForUserId:userId]];
+}
+
+/// Отказ открытия: временный не запирает аккаунт на MXFileStore (переход туда стирает базу с неотправленными),
+/// пока таких отказов подряд меньше `MXSQLiteSessionStoreMaxTransientOpenFailures`.
++ (void)noteOpenFailure:(NSError *)error forUserId:(NSString *)userId
+{
+    if ([MXSQLiteStore isTransientOpenError:error])
+    {
+        NSInteger count = [self transientOpenFailureCountForUserId:userId] + 1;
+        [NSUserDefaults.standardUserDefaults setInteger:count forKey:[self transientOpenFailureKeyForUserId:userId]];
+        if (count < MXSQLiteSessionStoreMaxTransientOpenFailures)
+        {
+            MXLogWarning(@"[MXSQLiteSessionStore] transient open failure %ld/%ld: the next launch retries SQLite",
+                         (long)count, (long)MXSQLiteSessionStoreMaxTransientOpenFailures);
+            return;
+        }
+        MXLogWarning(@"[MXSQLiteSessionStore] %ld transient open failures in a row: falling back", (long)count);
+    }
+    [self noteOpenFailureForUserId:userId];
 }
 
 #pragma mark - Deactivation
@@ -91,7 +123,7 @@ static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed
             });
         });
     } failure:^(NSError *error) {
-        [MXSQLiteSessionStore noteOpenFailureForUserId:userId];
+        [MXSQLiteSessionStore noteOpenFailure:error forUserId:userId];
         if (failure)
         {
             failure(error);

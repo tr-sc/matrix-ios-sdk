@@ -22,6 +22,9 @@ final class MXSQLiteSessionStoreTests: XCTestCase {
     }
 
     override func tearDown() {
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting(nil)
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(nil)
+        MXSQLiteSessionStore.clearOpenFailure(forUserId: userId)
         sandbox.remove()
         super.tearDown()
     }
@@ -153,5 +156,69 @@ final class MXSQLiteSessionStoreTests: XCTestCase {
         XCTAssertThrowsError(try open(store))
         XCTAssertTrue(MXSQLiteSessionStore.hasOpenFailure(forUserId: userId))
         MXSQLiteSessionStore.clearOpenFailure(forUserId: userId)
+    }
+
+    /// Обе попытки проверочного чтения писателя — SQLITE_NOMEM при своём ключе.
+    private func injectNoMemoryOnce() {
+        MXSQLiteDatabase.setNoMemoryRetryDelayForTesting(0)
+        MXSQLiteDatabase.setKeyCheckResultCodesForTesting([NSNumber(value: 7), NSNumber(value: 7)])
+    }
+
+    func testTransientOpenFailureDoesNotLockTheAccountOnTheFileStore() throws {
+        MXSQLiteSessionStore.clearOpenFailure(forUserId: userId)
+        let first = makeStore()
+        try open(first)
+        first.storePartialAttributedTextMessage(forRoom: roomA, partialAttributedTextMessage: NSAttributedString(string: "kept"))
+        first.close()
+
+        injectNoMemoryOnce()
+        XCTAssertThrowsError(try open(makeStore())) { error in
+            XCTAssertTrue(MXSQLiteStore.isTransientOpenError(error))
+        }
+        XCTAssertFalse(MXSQLiteSessionStore.hasOpenFailure(forUserId: userId), "the next cold start retries SQLite")
+        XCTAssertEqual(MXSQLiteSessionStore.transientOpenFailureCount(forUserId: userId), 1)
+        XCTAssertTrue(MXSQLiteStore.hasDatabase(forUserId: userId, rootDirectory: sandbox.directory))
+
+        let next = makeStore()
+        try open(next)
+        XCTAssertEqual(next.partialAttributedTextMessage(ofRoom: roomA)?.string, "kept", "the draft survived")
+        XCTAssertEqual(MXSQLiteSessionStore.transientOpenFailureCount(forUserId: userId), 0, "a good open resets the count")
+        next.close()
+    }
+
+    func testRepeatedTransientFailuresFallBackInTheEnd() throws {
+        MXSQLiteSessionStore.clearOpenFailure(forUserId: userId)
+        try open(makeStore())
+        for attempt in 1...MXSQLiteSessionStoreMaxTransientOpenFailures {
+            injectNoMemoryOnce()
+            XCTAssertThrowsError(try open(makeStore()))
+            XCTAssertEqual(MXSQLiteSessionStore.hasOpenFailure(forUserId: userId), attempt == MXSQLiteSessionStoreMaxTransientOpenFailures)
+        }
+    }
+
+    func testTransientFailureOnTheFirstSwitchKeepsOutgoingAndDoesNotDuplicateThem() throws {
+        try writeLegacyRoom(roomA, outgoing: ["~a1", "~a2"], draft: "draft A")
+
+        // База уже есть, а перенос не состоялся (прошлое открытие не дошло до него).
+        let created = makeStore()
+        created.legacyFileStoreURL = sandbox.directory.appendingPathComponent("no-legacy", isDirectory: true)
+        try open(created)
+        created.close()
+
+        // Первое открытие с переносом упирается в память.
+        injectNoMemoryOnce()
+        XCTAssertThrowsError(try open(makeStore()))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path), "nothing moved: MXFileStore keeps the outgoing")
+
+        let retried = makeStore()
+        try open(retried)
+        XCTAssertEqual(retried.outgoingMessages(inRoom: roomA)?.compactMap(\.eventId), ["~a1", "~a2"])
+        retried.close()
+
+        let again = makeStore()
+        try open(again)
+        XCTAssertEqual(again.outgoingMessages(inRoom: roomA)?.count, 2, "no duplicates on a later open")
+        XCTAssertEqual(count(again, "SELECT COUNT(*) FROM outgoing"), 2)
+        again.close()
     }
 }

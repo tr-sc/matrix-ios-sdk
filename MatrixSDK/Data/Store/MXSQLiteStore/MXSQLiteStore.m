@@ -349,9 +349,15 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
         return nil;
     }
 
-    MXSQLiteKeyMaterial *material = [self.keyProvider keyMaterialForIdentifier:keyIdentifier create:!existingOnly error:error];
+    NSError *keyError;
+    MXSQLiteKeyMaterial *material = [self.keyProvider keyMaterialForIdentifier:keyIdentifier create:!existingOnly error:&keyError];
     if (!material)
     {
+        [self reportOpenFailure:keyError];
+        if (error)
+        {
+            *error = keyError;
+        }
         return nil;
     }
 
@@ -375,6 +381,8 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
     }
     if (!database)
     {
+        // Временный отказ (память) и отказ без пересоздания (нет SQLCipher, ключ недоступен) — база не тронута.
+        [self reportOpenFailure:openError];
         if (error)
         {
             *error = openError;
@@ -382,9 +390,15 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
         return nil;
     }
 
-    if (![self prepareSchemaOfDatabase:database error:error])
+    NSError *schemaError;
+    if (![self prepareSchemaOfDatabase:database error:&schemaError])
     {
         [database close];
+        [self reportOpenFailure:schemaError];
+        if (error)
+        {
+            *error = schemaError;
+        }
         return nil;
     }
     if (self.extensionMode)
@@ -403,6 +417,41 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
     return database;
 }
 
++ (BOOL)isTransientOpenError:(NSError *)error
+{
+    return [error.domain isEqualToString:MXSQLiteErrorDomain] && error.code == MXSQLiteErrorTransient;
+}
+
++ (NSString *)openFailureReasonForError:(NSError *)error
+{
+    if (![error.domain isEqualToString:MXSQLiteErrorDomain])
+    {
+        return @"open_failed";
+    }
+    switch ((MXSQLiteErrorCode)error.code)
+    {
+        case MXSQLiteErrorTransient: return @"transient";
+        case MXSQLiteErrorCipherUnavailable: return @"cipher_unavailable";
+        case MXSQLiteErrorKeyUnavailable: return @"key_unavailable";
+        case MXSQLiteErrorInvalidKey: return @"invalid_key";
+        case MXSQLiteErrorSchema: return @"schema";
+        case MXSQLiteErrorKeyRejected: return @"key_rejected";
+        default: return @"open_failed";
+    }
+}
+
+- (void)reportOpenFailure:(NSError *)error
+{
+    NSString *reason = [MXSQLiteStore openFailureReasonForError:error];
+    MXLogWarning(@"[MXSQLiteStore] Open failed without recreating the store (%@): %@", reason, error.localizedDescription);
+    if ([self.metricsDelegate respondsToSelector:@selector(store:didFailToOpenWithReason:)])
+    {
+        [self.metricsDelegate store:self didFailToOpenWithReason:reason];
+    }
+}
+
+/// Пересоздать базу: чужой ключ (`SQLITE_NOTADB`, `SQLITE_CORRUPT`, `SQLITE_NOMEM` с несошедшимся HMAC страницы 1)
+/// или битый файл. Временный отказ (`MXSQLiteErrorTransient`) и отказ без SQLCipher сюда не попадают.
 - (BOOL)isRecoverableOpenError:(NSError *)error
 {
     if (![error.domain isEqualToString:MXSQLiteErrorDomain])

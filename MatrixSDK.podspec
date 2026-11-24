@@ -32,7 +32,9 @@ Pod::Spec.new do |s|
       
       ss.source_files = "MatrixSDK", "MatrixSDK/**/*.{h,m}", "MatrixSDK/**/*.{swift}"
       ss.osx.exclude_files = "MatrixSDK/VoIP/MXiOSAudioOutputRoute*.swift"
-      ss.private_header_files = ['MatrixSDK/MatrixSDKSwiftHeader.h', "MatrixSDK/**/*_Private.h"]
+      # `*+Testing.h` — подменники для тестов (MXSQLiteDatabase+Testing.h снимает fail-closed проверку SQLCipher):
+      # не в зонтичном заголовке и не в модуле, из `import MatrixSDK` не видны.
+      ss.private_header_files = ['MatrixSDK/MatrixSDKSwiftHeader.h', "MatrixSDK/**/*_Private.h", "MatrixSDK/**/*+Testing.h"]
       ss.resources = "MatrixSDK/**/*.{xcdatamodeld}"
       ss.frameworks = "CoreData"
 

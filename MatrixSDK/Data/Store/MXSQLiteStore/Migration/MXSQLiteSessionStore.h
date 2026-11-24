@@ -21,7 +21,14 @@ NS_ASSUME_NONNULL_BEGIN
  3. Только потом `onComplete`: сессия монтируется уже с перенесённым.
 
  Неудачное открытие запоминается (`hasOpenFailureForUserId:`), чтобы следующий запуск вернулся на MXFileStore.
+ Кроме временного отказа (`+[MXSQLiteStore isTransientOpenError:]`, памяти не хватило, ключ свой): база и ключ целы,
+ отметка не ставится, и следующий холодный старт снова открывает SQLite. Только после
+ `MXSQLiteSessionStoreMaxTransientOpenFailures` временных отказов подряд он считается обычным — иначе аккаунт без
+ конца стартовал бы без сессии.
  */
+/// Сколько временных отказов открытия подряд терпится, прежде чем отказ запоминается как обычный.
+FOUNDATION_EXPORT NSInteger const MXSQLiteSessionStoreMaxTransientOpenFailures;
+
 @interface MXSQLiteSessionStore : MXSQLiteStore
 
 /// Папка MXFileStore аккаунта. nil — `+[MXSQLiteLegacyImport fileStoreURLForUserId:]`.
@@ -40,6 +47,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Последнее открытие базы аккаунта не удалось.
 + (BOOL)hasOpenFailureForUserId:(NSString *)userId;
 + (void)clearOpenFailureForUserId:(NSString *)userId;
+/// Временных отказов открытия подряд с последнего удачного.
++ (NSInteger)transientOpenFailureCountForUserId:(NSString *)userId;
 
 @end
 
