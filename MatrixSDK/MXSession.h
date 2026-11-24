@@ -137,6 +137,12 @@ typedef NS_ENUM(NSUInteger, MXSessionState)
 FOUNDATION_EXPORT NSString *const kMXSessionStateDidChangeNotification;
 
 /**
+ Posted on the main thread once the store has opened, before its rooms are mounted: the store can be read directly
+ while `rooms` is incomplete. StoreDataReady still means all rooms are mounted. The object is the session.
+ */
+FOUNDATION_EXPORT NSString *const kMXSessionStoreDidOpenNotification;
+
+/**
  Posted when MXSession has detected a new room coming from the event stream.
 
  The passed userInfo dictionary contains:
@@ -442,6 +448,9 @@ FOUNDATION_EXPORT NSString *const kMXSessionNoRoomTag;
 
 /** YES while aggregate unread totals cover only the hydrated rooms. */
 @property (nonatomic, readonly) BOOL roomListTotalsArePartial;
+
+/// The store has opened (`kMXSessionStoreDidOpenNotification`); rooms may still be mounting.
+@property (nonatomic, readonly) BOOL trscStoreIsOpen;
 
 /**
  The flag indicating that we are trying to establish the event streams (/sync)

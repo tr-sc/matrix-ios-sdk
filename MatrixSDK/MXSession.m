@@ -55,6 +55,7 @@
 
 #pragma mark - Constants definitions
 NSString *const kMXSessionStateDidChangeNotification = @"kMXSessionStateDidChangeNotification";
+NSString *const kMXSessionStoreDidOpenNotification = @"kMXSessionStoreDidOpenNotification";
 NSString *const kMXSessionNewRoomNotification = @"kMXSessionNewRoomNotification";
 NSString *const kMXSessionWillLeaveRoomNotification = @"kMXSessionWillLeaveRoomNotification";
 NSString *const kMXSessionDidLeaveRoomNotification = @"kMXSessionDidLeaveRoomNotification";
@@ -494,6 +495,10 @@ typedef void (^MXOnResumeDone)(void);
         }
 
         self.storeService.aggregations = [[MXAggregations alloc] initWithMatrixSession:self];
+
+        // Readers of the store itself (the first page of the room list) need not wait for the mount below.
+        self->_trscStoreIsOpen = YES;
+        [[NSNotificationCenter defaultCenter] postNotificationName:kMXSessionStoreDidOpenNotification object:self];
 
         // Building the crypto module opens the Rust store (a 500k-round KDF) off the main thread and
         // reads neither rooms nor summaries, while mounting the store needs neither crypto nor its
