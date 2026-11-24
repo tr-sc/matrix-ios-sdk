@@ -6,6 +6,7 @@
 #import <Foundation/Foundation.h>
 
 @class MXSQLiteStore;
+@class MXCredentials;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -41,8 +42,11 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(importFromFileStore(at:into:));
 
 /// Экспортировать локальные черновики и исходящие сообщения обратно в MXFileStore перед откатом флага.
-+ (BOOL)exportLocalOnlyDataFromStore:(MXSQLiteStore *)store toFileStoreAtURL:(NSURL *)fileStoreURL error:(NSError **)error
-    NS_SWIFT_NAME(exportLocalOnlyData(from:toFileStoreAt:error:));
++ (BOOL)exportLocalOnlyDataFromStore:(MXSQLiteStore *)store
+                     toFileStoreAtURL:(NSURL *)fileStoreURL
+                          credentials:(MXCredentials *)credentials
+                                error:(NSError **)error
+    NS_SWIFT_NAME(exportLocalOnlyData(from:toFileStoreAt:credentials:));
 
 @end
 

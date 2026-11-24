@@ -40,6 +40,11 @@
 @property (nonatomic) NSString *eventStreamToken;
 
 /**
+ Preserve locally exported data on initial MXFileStore open even when there is no classic /sync token yet.
+ */
+@property (nonatomic) BOOL preserveLocalDataWithoutSyncToken;
+
+/**
  The id of the filter being used in /sync requests.
  */
 @property (nonatomic) NSString *syncFilterId;

@@ -30,7 +30,7 @@
 #import "MXFileRoomSummaryStore.h"
 #import "MXSlidingSync.h"
 
-static NSUInteger const kMXFileVersion = 83;    // Check getUnreadRoomFromStore if you update this value. Delete this comment after
+NSUInteger const MXFileStoreCurrentVersion = 83;    // Check getUnreadRoomFromStore if you update this value. Delete this comment after
 
 static NSString *const kMXFileStoreFolder = @"MXFileStore";
 static NSString *const kMXFileStoreMedaDataFile = @"MXFileStore";
@@ -235,7 +235,7 @@ static NSUInteger preloadOptions;
             [self checkStorageValidity];
             
             // Check store version
-            if (self->metaData && kMXFileVersion != self->metaData.version)
+            if (self->metaData && MXFileStoreCurrentVersion != self->metaData.version)
             {
                 MXLogDebug(@"[MXFileStore] New MXFileStore version detected");
 
@@ -285,7 +285,7 @@ static NSUInteger preloadOptions;
                 self->metaData = [[MXFileStoreMetaData alloc] init];
                 self->metaData.homeServer = [self->credentials.homeServer copy];
                 self->metaData.userId = [self->credentials.userId copy];
-                self->metaData.version = kMXFileVersion;
+                self->metaData.version = MXFileStoreCurrentVersion;
                 self->metaDataHasChanged = YES;
                 [self saveMetaData];
             }
@@ -717,7 +717,21 @@ static NSUInteger preloadOptions;
     if (metaData)
     {
         metaData.eventStreamToken = eventStreamToken;
+        if (eventStreamToken.length)
+        {
+            metaData.preserveLocalDataWithoutSyncToken = NO;
+        }
         metaDataHasChanged = YES;
+    }
+}
+
+- (void)markLocalDataCheckpointed
+{
+    if (metaData && metaData.preserveLocalDataWithoutSyncToken)
+    {
+        metaData.preserveLocalDataWithoutSyncToken = NO;
+        metaDataHasChanged = YES;
+        [self saveMetaData];
     }
 }
 
@@ -2013,6 +2027,10 @@ static NSUInteger preloadOptions;
     {
         [super setEventStreamToken:metaData.eventStreamToken];
         backupEventStreamToken = self.eventStreamToken;
+    }
+    else if (metaData && metaData.preserveLocalDataWithoutSyncToken)
+    {
+        MXLogDebug(@"[MXFileStore] loadMetaData: preserving locally exported data until the first /sync checkpoint");
     }
     else if (metaData && MXSlidingSyncHasPersistedPosition(credentials))
     {

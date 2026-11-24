@@ -63,7 +63,7 @@ static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed
         return NO;
     }
     NSURL *legacy = [MXSQLiteLegacyImport fileStoreURLForUserId:userId];
-    if (![MXSQLiteLegacyImport exportLocalOnlyDataFromStore:store toFileStoreAtURL:legacy error:&error])
+    if (![MXSQLiteLegacyImport exportLocalOnlyDataFromStore:store toFileStoreAtURL:legacy credentials:credentials error:&error])
     {
         [store close];
         MXLogWarning(@"[MXSQLiteSessionStore] rollback export failed; keeping SQLite store: %@", error.localizedDescription);
