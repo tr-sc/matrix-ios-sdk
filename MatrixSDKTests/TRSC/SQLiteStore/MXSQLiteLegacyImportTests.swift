@@ -109,6 +109,37 @@ final class MXSQLiteLegacyImportTests: XCTestCase {
         XCTAssertEqual(harness.store.outgoingMessages(inRoom: roomB)?.count, 1)
     }
 
+    func testFailedFlushDoesNotMarkImportCompleteAndCanRetry() throws {
+        try writeLegacyRoom(roomA, outgoing: [echo("~retry", roomId: roomA)], draft: "retry draft")
+        try harness.database.exec("CREATE TRIGGER reject_outgoing BEFORE INSERT ON outgoing BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+
+        let failed = MXSQLiteLegacyImport.importFromFileStore(at: legacy, into: harness.store)
+        XCTAssertFalse(failed.succeeded)
+        XCTAssertNotNil(failed.error)
+        XCTAssertEqual(harness.count("SELECT COUNT(*) FROM meta WHERE key = 'legacy_import_done'"), 0)
+
+        try harness.database.exec("DROP TRIGGER reject_outgoing")
+        let retried = MXSQLiteLegacyImport.importFromFileStore(at: legacy, into: harness.store)
+        XCTAssertTrue(retried.succeeded)
+        XCTAssertEqual(harness.store.outgoingMessages(inRoom: roomA)?.compactMap(\.eventId), ["~retry"])
+        XCTAssertEqual(harness.store.partialAttributedTextMessage(ofRoom: roomA)?.string, "retry draft")
+    }
+
+    func testRollbackExportPreservesDraftAndOutgoingForFileStoreImport() throws {
+        harness.store.storeOutgoingMessage(forRoom: roomA, outgoingMessage: echo("~rollback", roomId: roomA))
+        harness.store.storePartialAttributedTextMessage(forRoom: roomA, partialAttributedTextMessage: NSAttributedString(string: "rollback draft"))
+
+        var exportError: NSError?
+        XCTAssertTrue(MXSQLiteLegacyImport.exportLocalOnlyData(from: harness.store, toFileStoreAt: legacy, error: &exportError), "\(String(describing: exportError))")
+
+        let destination = try MXSQLiteStoreHarness(self, name: "\(name)-rollback-destination")
+        defer { destination.remove() }
+        let imported = MXSQLiteLegacyImport.importFromFileStore(at: legacy, into: destination.store)
+        XCTAssertTrue(imported.succeeded)
+        XCTAssertEqual(destination.store.outgoingMessages(inRoom: roomA)?.compactMap(\.eventId), ["~rollback"])
+        XCTAssertEqual(destination.store.partialAttributedTextMessage(ofRoom: roomA)?.string, "rollback draft")
+    }
+
     func testDefaultFolderIsTheFileStoreLayout() {
         let url = MXSQLiteLegacyImport.fileStoreURL(forUserId: "@me:example.org")
         XCTAssertEqual(url.lastPathComponent, "@me:example.org")
