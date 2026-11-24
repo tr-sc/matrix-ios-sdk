@@ -114,7 +114,7 @@ typedef NS_ENUM(NSInteger, MXSQLiteCheckpointMode)
 typedef BOOL (^MXSQLiteWriteBody)(MXSQLiteConnection *connection, NSError **error);
 
 /**
- Зашифрованная база SQLCipher (ADR-0022 §iOS): сырой ключ без KDF, соль вне файла, открытый заголовок 32 байта,
+ Зашифрованная база SQLCipher: сырой ключ без KDF, соль вне файла, открытый заголовок 32 байта,
  WAL, один писатель на последовательной очереди и пул читателей.
 
  Открытие fail-closed: пустой `cipher_version` (символы sqlite3 разрешились не в SQLCipher, а в копию SQLite внутри

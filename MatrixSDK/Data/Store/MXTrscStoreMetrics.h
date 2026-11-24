@@ -10,7 +10,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Куда SDK отдаёт метрики хранилища (iP12). Приложение пишет их в журнал запуска (`TrscLaunchMetrics`).
+/// Куда SDK отдаёт метрики хранилища. Приложение пишет их в журнал запуска (`TrscLaunchMetrics`).
 /// Вызывается на любом потоке.
 @protocol MXTrscStoreMetricsSink <NSObject>
 /// Одно измерение вне записи запуска (`perf-events.jsonl`).

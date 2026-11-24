@@ -21,6 +21,7 @@
 #import "MXSQLiteRoomRegistry.h"
 #import "MXSQLiteSchema.h"
 #import "MXSQLiteStoreComponent.h"
+#import "MXSQLiteStoreOpener.h"
 #import "MXSQLiteEventStore.h"
 #import "MXSQLiteStateStore.h"
 #import "MXSQLiteMetaStore.h"
@@ -47,6 +48,7 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
 /// selector → компонент. Строится один раз по протоколам компонентов, не меняется.
 @property (nonatomic, readonly) NSDictionary<NSString *, id<MXSQLiteStoreComponent>> *routes;
 @property (nonatomic, readonly) dispatch_queue_t openQueue;
+@property (nonatomic, readonly) MXSQLiteStoreOpener *opener;
 /// Комнаты, строки которых удаляются в следующем коммите.
 @property (nonatomic) NSMutableOrderedSet<NSString *> *pendingRoomDeletions;
 @property (nonatomic) id<MXBackgroundTask> commitBackgroundTask;
@@ -153,6 +155,8 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
         _pendingLock = OS_UNFAIR_LOCK_INIT;
         _pendingRoomDeletions = [NSMutableOrderedSet orderedSet];
         _openQueue = dispatch_queue_create("org.matrix.sdk.sqlite.open", DISPATCH_QUEUE_SERIAL);
+        _opener = [[MXSQLiteStoreOpener alloc] initWithStore:self keyProvider:keyProvider rootDirectory:_rootDirectory
+                                                 readerCount:kMXSQLiteStoreReaderCount];
 
         _rooms = [MXSQLiteRoomRegistry new];
         _context = [[MXSQLiteStoreContext alloc] initWithRooms:_rooms];
@@ -161,7 +165,7 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
         // Компоненты живут с самого начала: до open база nil, чтение пустое — как у MXFileStore до загрузки.
         MXSQLiteOutgoingStore *outgoing = [[MXSQLiteOutgoingStore alloc] initWithContext:_context];
         _context.outgoing = outgoing;
-        // Сводки (iP5) — компонент без маршрутов: протокол `MXRoomSummaryStore` отдельный, а запись идёт в общей
+        // Сводки — компонент без маршрутов: протокол `MXRoomSummaryStore` отдельный, а запись идёт в общей
         // транзакции коммита вместе с событиями и токеном синка.
         MXSQLiteRoomSummaryStore *summaries = [[MXSQLiteRoomSummaryStore alloc] initWithContext:_context];
         _roomSummaryStore = summaries;
@@ -273,7 +277,7 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
 
     dispatch_async(self.openQueue, ^{
         NSError *error;
-        MXSQLiteDatabase *database = [self openDatabaseForUserId:credentials.userId error:&error];
+        MXSQLiteDatabase *database = [self.opener openDatabaseForUserId:credentials.userId error:&error];
         dispatch_async(dispatch_get_main_queue(), ^{
             [backgroundTask stop];
             if (!database)
@@ -285,11 +289,7 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
                 }
                 return;
             }
-            self.context.database = database;
-            if ([self.metricsDelegate respondsToSelector:@selector(store:didOpenInMilliseconds:databaseBytes:)])
-            {
-                [self.metricsDelegate store:self didOpenInMilliseconds:database.openMilliseconds databaseBytes:database.fileSize];
-            }
+            [self didOpenDatabase:database];
             if (onComplete)
             {
                 onComplete();
@@ -302,7 +302,6 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
 {
     NSParameterAssert(credentials.userId);
     self.context.credentials = credentials;
-    // Сводки комнат живут в той же базе (iP5): стор создаётся в init и пишется в общей транзакции.
 }
 
 - (BOOL)openSynchronouslyWithCredentials:(MXCredentials *)credentials error:(NSError **)error
@@ -311,7 +310,7 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
     __block MXSQLiteDatabase *database;
     __block NSError *openError;
     dispatch_sync(self.openQueue, ^{
-        database = [self openDatabaseForUserId:credentials.userId error:&openError];
+        database = [self.opener openDatabaseForUserId:credentials.userId error:&openError];
     });
     if (!database)
     {
@@ -322,99 +321,17 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
         }
         return NO;
     }
+    [self didOpenDatabase:database];
+    return YES;
+}
+
+- (void)didOpenDatabase:(MXSQLiteDatabase *)database
+{
     self.context.database = database;
     if ([self.metricsDelegate respondsToSelector:@selector(store:didOpenInMilliseconds:databaseBytes:)])
     {
         [self.metricsDelegate store:self didOpenInMilliseconds:database.openMilliseconds databaseBytes:database.fileSize];
     }
-    return YES;
-}
-
-/// Открытие с самовосстановлением. Отказ без пересоздания — только когда под нами не SQLCipher: снести базу тут
-/// значит молча продолжить открытым текстом.
-- (MXSQLiteDatabase *)openDatabaseForUserId:(NSString *)userId error:(NSError **)error
-{
-    NSURL *url = [MXSQLiteStore databaseURLForUserId:userId rootDirectory:self.rootDirectory];
-    NSString *keyIdentifier = [MXSQLiteStore keyIdentifierForUserId:userId];
-
-    // NSE (только чтение или стор расширения) ничего не создаёт: нет базы приложения — нет SQLite.
-    BOOL existingOnly = self.readOnly || self.extensionMode;
-    if (existingOnly && ![NSFileManager.defaultManager fileExistsAtPath:url.path])
-    {
-        if (error)
-        {
-            *error = [NSError errorWithDomain:MXSQLiteErrorDomain code:MXSQLiteErrorOpenFailed
-                                     userInfo:@{NSLocalizedDescriptionKey: @"no store file"}];
-        }
-        return nil;
-    }
-
-    NSError *keyError;
-    MXSQLiteKeyMaterial *material = [self.keyProvider keyMaterialForIdentifier:keyIdentifier create:!existingOnly error:&keyError];
-    if (!material)
-    {
-        [self reportOpenFailure:keyError];
-        if (error)
-        {
-            *error = keyError;
-        }
-        return nil;
-    }
-
-    NSError *openError;
-    MXSQLiteDatabase *database = [MXSQLiteDatabase openAtURL:url key:material.key salt:material.salt readOnly:self.readOnly
-                                                 readerCount:kMXSQLiteStoreReaderCount error:&openError];
-    if (!database && !existingOnly && [self isRecoverableOpenError:openError])
-    {
-        NSString *reason = openError.code == MXSQLiteErrorKeyRejected ? @"key_rejected" : @"corrupt";
-        MXLogWarning(@"[MXSQLiteStore] Recreating the store (%@): %@", reason, openError.localizedDescription);
-        [MXSQLiteDatabase removeFilesAtURL:url];
-        [self.keyProvider removeKeyMaterialForIdentifier:keyIdentifier];
-        material = [self.keyProvider keyMaterialForIdentifier:keyIdentifier create:YES error:error];
-        if (!material)
-        {
-            return nil;
-        }
-        [self reportResetWithReason:reason];
-        database = [MXSQLiteDatabase openAtURL:url key:material.key salt:material.salt readOnly:NO
-                                   readerCount:kMXSQLiteStoreReaderCount error:&openError];
-    }
-    if (!database)
-    {
-        // Временный отказ (память) и отказ без пересоздания (нет SQLCipher, ключ недоступен) — база не тронута.
-        [self reportOpenFailure:openError];
-        if (error)
-        {
-            *error = openError;
-        }
-        return nil;
-    }
-
-    NSError *schemaError;
-    if (![self prepareSchemaOfDatabase:database error:&schemaError])
-    {
-        [database close];
-        [self reportOpenFailure:schemaError];
-        if (error)
-        {
-            *error = schemaError;
-        }
-        return nil;
-    }
-    if (self.extensionMode)
-    {
-        // Приложение не ждёт NSE (его транзакции — миллисекунды), а NSE не висит за долгой транзакцией приложения.
-        NSString *pragma = [NSString stringWithFormat:@"PRAGMA busy_timeout = %ld;", (long)MXSQLiteExtensionBusyTimeoutMilliseconds];
-        BOOL ok = [database withWriter:^BOOL(MXSQLiteConnection *connection, NSError **blockError) {
-            return [connection execute:pragma error:blockError];
-        } error:error];
-        if (!ok)
-        {
-            [database close];
-            return nil;
-        }
-    }
-    return database;
 }
 
 + (BOOL)isTransientOpenError:(NSError *)error
@@ -437,76 +354,6 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
         case MXSQLiteErrorSchema: return @"schema";
         case MXSQLiteErrorKeyRejected: return @"key_rejected";
         default: return @"open_failed";
-    }
-}
-
-- (void)reportOpenFailure:(NSError *)error
-{
-    NSString *reason = [MXSQLiteStore openFailureReasonForError:error];
-    MXLogWarning(@"[MXSQLiteStore] Open failed without recreating the store (%@): %@", reason, error.localizedDescription);
-    if ([self.metricsDelegate respondsToSelector:@selector(store:didFailToOpenWithReason:)])
-    {
-        [self.metricsDelegate store:self didFailToOpenWithReason:reason];
-    }
-}
-
-/// Пересоздать базу: чужой ключ (`SQLITE_NOTADB`, `SQLITE_CORRUPT`, `SQLITE_NOMEM` с несошедшимся HMAC страницы 1)
-/// или битый файл. Временный отказ (`MXSQLiteErrorTransient`) и отказ без SQLCipher сюда не попадают.
-- (BOOL)isRecoverableOpenError:(NSError *)error
-{
-    if (![error.domain isEqualToString:MXSQLiteErrorDomain])
-    {
-        return NO;
-    }
-    if (error.code == MXSQLiteErrorKeyRejected)
-    {
-        return YES;
-    }
-    int resultCode = [error.userInfo[MXSQLiteErrorResultCodeKey] intValue];
-    return error.code == MXSQLiteErrorOpenFailed && (resultCode == 11 /* SQLITE_CORRUPT */ || resultCode == 26 /* SQLITE_NOTADB */);
-}
-
-- (BOOL)prepareSchemaOfDatabase:(MXSQLiteDatabase *)database error:(NSError **)error
-{
-    if (database.readOnly || self.extensionMode)
-    {
-        // NSE схему не трогает: чужая версия — работаем как без стора.
-        int64_t version = [[database read:^id(MXSQLiteConnection *connection) {
-            return @([connection int64ForQuery:@"PRAGMA user_version;" defaultValue:0 error:nil]);
-        }] longLongValue];
-        if (version != MXSQLiteSchema.currentVersion)
-        {
-            if (error)
-            {
-                *error = [NSError errorWithDomain:MXSQLiteErrorDomain code:MXSQLiteErrorSchema
-                                         userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"schema %lld", version]}];
-            }
-            return NO;
-        }
-        return YES;
-    }
-
-    __block MXSQLiteSchemaOutcome outcome = MXSQLiteSchemaOutcomeUpToDate;
-    BOOL ok = [database withWriter:^BOOL(MXSQLiteConnection *connection, NSError **blockError) {
-        return [MXSQLiteSchema prepareConnection:connection
-                                   targetVersion:MXSQLiteSchema.currentVersion
-                                      statements:MXSQLiteSchema.statements
-                                      migrations:@{}
-                                         outcome:&outcome
-                                           error:blockError];
-    } error:error];
-    if (ok && outcome == MXSQLiteSchemaOutcomeRebuilt)
-    {
-        [self reportResetWithReason:@"schema_mismatch"];
-    }
-    return ok;
-}
-
-- (void)reportResetWithReason:(NSString *)reason
-{
-    if ([self.metricsDelegate respondsToSelector:@selector(store:didResetWithReason:)])
-    {
-        [self.metricsDelegate store:self didResetWithReason:reason];
     }
 }
 
@@ -869,7 +716,7 @@ NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds = 1000;
     [_roomSummaryStore removeAllSummaries];
 }
 
-#pragma mark - MXTimelineStore: summaries (iP5)
+#pragma mark - MXTimelineStore: summaries
 
 - (NSArray<id<MXRoomSummaryProtocol>> *)summariesOrderedByActivity:(NSUInteger)limit
 {

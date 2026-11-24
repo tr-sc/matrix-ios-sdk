@@ -18,7 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds;
 
 /**
- Хранилище сессии на SQLCipher «события + дыры» (ADR-0022). Одна база на аккаунт:
+ Хранилище сессии на SQLCipher «события + дыры». Одна база на аккаунт:
  `<app group>/MXSQLiteStore/<sha256(userId)[0..16]>/store.sqlite`.
 
  Фасад: сам держит только открытие, коммит, удаление и сводки; остальные методы `MXStore` / `MXTimelineStore`
@@ -41,7 +41,7 @@ FOUNDATION_EXPORT NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds;
                            readOnly:(BOOL)readOnly NS_DESIGNATED_INITIALIZER;
 
 /**
- Стор NSE (iP9): та же база аккаунта в app group и тот же ключ из Keychain. Открывает только существующий файл
+ Стор NSE: та же база аккаунта в app group и тот же ключ из Keychain. Открывает только существующий файл
  (ключ не создаёт, базу не пересоздаёт, схему не трогает — чужая версия схемы = ошибка открытия). Писатель есть,
  но `commit` / `flush` ничего не пишут: на диск попадает только `insertPushEvent:inRoom:error:`. Ожидание
  писателя приложения — не дольше `MXSQLiteExtensionBusyTimeoutMilliseconds`, потом отказ (пуш показывается и так).

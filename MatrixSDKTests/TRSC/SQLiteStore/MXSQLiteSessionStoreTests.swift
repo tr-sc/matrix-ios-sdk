@@ -6,7 +6,7 @@
 import MatrixSDK
 import XCTest
 
-/// Стор сессии при включённом флаге (iP9): первое открытие переносит неотправленные и черновики из MXFileStore
+/// Стор сессии при включённом флаге: первое открытие переносит неотправленные и черновики из MXFileStore
 /// и удаляет его папку и сводки; повторное — ничего не делает; выключение флага стирает базу и ключ.
 final class MXSQLiteSessionStoreTests: XCTestCase {
     private var sandbox: MXSQLiteTestSandbox!

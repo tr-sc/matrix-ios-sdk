@@ -6,7 +6,7 @@
 import MatrixSDK
 import XCTest
 
-/// iP12: метрики хранилища для журнала запуска — те же имена, что у Android (`TrscStartupTimings.kt`), и
+/// Метрики хранилища для журнала запуска — те же имена, что у Android (`TrscStartupTimings.kt`), и
 /// `store=sqlite|file` в detail, чтобы один отчёт сравнивал старый и новый стор.
 final class MXTrscStoreMetricsTests: XCTestCase {
     private final class Sink: NSObject, MXTrscStoreMetricsSink {
@@ -159,7 +159,7 @@ final class MXTrscStoreMetricsTests: XCTestCase {
         XCTAssertEqual(sink.events.filter { $0.name == "sync_persist_ms" }.count, 1)
     }
 
-    // MARK: - Open outcome (#1011)
+    // MARK: - Open outcome
 
     func testOpenOutcomeIsOneJournalLine() {
         let store = MXSQLiteStore(keyProvider: MXSQLiteMemoryKeyProvider(), rootDirectory: FileManager.default.temporaryDirectory, readOnly: true)

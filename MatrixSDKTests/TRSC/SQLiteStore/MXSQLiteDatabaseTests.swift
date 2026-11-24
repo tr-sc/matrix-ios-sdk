@@ -6,7 +6,7 @@
 import MatrixSDK
 import XCTest
 
-/// Ядро SQLCipher (ADR-0022 §iOS): ключ без KDF, открытый заголовок, fail-closed, писатель и читатели.
+/// Ядро SQLCipher: ключ без KDF, открытый заголовок, fail-closed, писатель и читатели.
 final class MXSQLiteDatabaseTests: XCTestCase {
     private var sandbox: MXSQLiteTestSandbox!
 
@@ -130,7 +130,7 @@ final class MXSQLiteDatabaseTests: XCTestCase {
         }
     }
 
-    // MARK: - SQLITE_NOMEM: memory or a foreign key (#1011)
+    // MARK: - SQLITE_NOMEM: memory or a foreign key
 
     private let noMemory = NSNumber(value: 7) // SQLITE_NOMEM
 

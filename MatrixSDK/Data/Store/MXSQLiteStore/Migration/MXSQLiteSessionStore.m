@@ -140,7 +140,7 @@ NSInteger const MXSQLiteSessionStoreMaxTransientOpenFailures = 3;
     {
         MXLogWarning(@"[MXSQLiteSessionStore] MXFileStore folder not removed: %@", error.localizedDescription);
     }
-    // Сводки старого стора (CoreData) — тот же объект, что у этой базы до iP5; после iP5 — пустая таблица.
+    // Без сводок сессия не восстанавливает позицию Sliding Sync старого стора: первый синк — начальный.
     [self.roomSummaryStore removeAllSummaries];
 }
 
