@@ -30,6 +30,7 @@ static NSString* const kEncodingKeySupportedMatrixVersions = @"supportedMatrixVe
         _homeServer = dict[@"homeServer"];
         _userId = dict[@"userId"];
         _eventStreamToken = dict[@"eventStreamToken"];
+        _preserveLocalDataWithoutSyncToken = [dict[@"preserveLocalDataWithoutSyncToken"] boolValue];
         _syncFilterId = dict[@"syncFilterId"];
         _userAccountData = dict[@"userAccountData"];
         
@@ -58,6 +59,7 @@ static NSString* const kEncodingKeySupportedMatrixVersions = @"supportedMatrixVe
                                   @"userId": _userId,
                                   @"version": @(_version),
                                   @"maxUploadSize": @(_maxUploadSize),
+                                  @"preserveLocalDataWithoutSyncToken": @(_preserveLocalDataWithoutSyncToken),
                                   @"areAllIdentityServerTermsAgreed": [NSNumber numberWithBool:_areAllIdentityServerTermsAgreed]
                                   }];
 
@@ -98,6 +100,7 @@ static NSString* const kEncodingKeySupportedMatrixVersions = @"supportedMatrixVe
     metaData->_userId = [_userId copyWithZone:zone];
     metaData->_version = _version;
     metaData->_eventStreamToken = [_eventStreamToken copyWithZone:zone];
+    metaData->_preserveLocalDataWithoutSyncToken = _preserveLocalDataWithoutSyncToken;
     metaData->_userAccountData = [_userAccountData copyWithZone:zone];
     metaData->_areAllIdentityServerTermsAgreed = _areAllIdentityServerTermsAgreed;
     metaData->_maxUploadSize = _maxUploadSize;

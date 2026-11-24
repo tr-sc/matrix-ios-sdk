@@ -30,9 +30,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Итог переноса последнего открытия; nil — папки MXFileStore не было.
 @property (nonatomic, readonly, nullable) MXSQLiteLegacyImportResult *legacyImportResult;
 
-/// Флаг выключен, а база осталась: удалить базу, ключ и сводки, чтобы MXFileStore начал с чистого синка.
-/// Неотправленные и черновики новой базы при этом теряются (обратного переноса нет).
-+ (void)deactivateForCredentials:(MXCredentials *)credentials
+/// Откатить стор в MXFileStore. Сначала экспортирует локальные черновики и исходящие; при ошибке ничего не удаляет.
++ (BOOL)deactivateForCredentials:(MXCredentials *)credentials
                    rootDirectory:(nullable NSURL *)rootDirectory
                      keyProvider:(id<MXSQLiteKeyProviding>)keyProvider
     NS_SWIFT_NAME(deactivate(for:rootDirectory:keyProvider:));

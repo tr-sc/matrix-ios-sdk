@@ -1209,6 +1209,11 @@ typedef void (^MXOnResumeDone)(void);
         // The fields set after the commit (to-device position) reach the database with the next commit.
         ((MXSQLiteStore *)self.store).trscSlidingSyncState = state;
     }
+    else if ([self.store isKindOfClass:MXFileStore.class])
+    {
+        // A local-only rollback export is retained until this first durable sync checkpoint.
+        [(MXFileStore *)self.store markLocalDataCheckpointed];
+    }
 }
 
 - (void)restoreSlidingSyncStateWithConfiguration:(MXSlidingSyncConfiguration *)configuration

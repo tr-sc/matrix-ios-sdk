@@ -8,6 +8,7 @@
 #import "MXCredentials.h"
 #import "MXLog.h"
 #import "MXSQLiteLegacyImport.h"
+#import "MXSQLiteDatabase.h"
 #import "MatrixSDKSwiftHeader.h"
 
 static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed.";
@@ -42,20 +43,40 @@ static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed
 
 #pragma mark - Deactivation
 
-+ (void)deactivateForCredentials:(MXCredentials *)credentials
++ (BOOL)deactivateForCredentials:(MXCredentials *)credentials
                    rootDirectory:(NSURL *)rootDirectory
                      keyProvider:(id<MXSQLiteKeyProviding>)keyProvider
 {
     NSString *userId = credentials.userId;
     if (!userId.length)
     {
-        return;
+        return NO;
     }
+
+    // Open the existing DB read-only: the regular writer can recreate a corrupt database, which
+    // would turn a rollback attempt into silent deletion of the only copy of local-only data.
+    MXSQLiteStore *store = [[MXSQLiteStore alloc] initWithKeyProvider:keyProvider rootDirectory:rootDirectory readOnly:YES];
+    NSError *error;
+    if (![store openSynchronouslyWithCredentials:credentials error:&error])
+    {
+        MXLogWarning(@"[MXSQLiteSessionStore] rollback export could not open SQLite store: %@", error.localizedDescription);
+        return NO;
+    }
+    NSURL *legacy = [MXSQLiteLegacyImport fileStoreURLForUserId:userId];
+    if (![MXSQLiteLegacyImport exportLocalOnlyDataFromStore:store toFileStoreAtURL:legacy credentials:credentials error:&error])
+    {
+        [store close];
+        MXLogWarning(@"[MXSQLiteSessionStore] rollback export failed; keeping SQLite store: %@", error.localizedDescription);
+        return NO;
+    }
+    [store close];
+
     MXLogDebug(@"[MXSQLiteSessionStore] deactivate: back to MXFileStore with a clean sync");
     [MXSQLiteStore deleteDataForUserId:userId rootDirectory:rootDirectory keyProvider:keyProvider];
     // Сводки общие (CoreData): без их сброса MXFileStore восстановил бы позицию Sliding Sync новой базы.
     [[[MXCoreDataRoomSummaryStore alloc] initWithCredentials:credentials] removeAllSummaries];
     [self clearOpenFailureForUserId:userId];
+    return YES;
 }
 
 #pragma mark - Open
@@ -78,12 +99,29 @@ static NSString *const kOpenFailureKeyPrefix = @"MXSQLiteSessionStore.openFailed
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
             MXSQLiteLegacyImportResult *result = [MXSQLiteLegacyImport importFromFileStoreAtURL:legacy intoStore:self];
-            [self removeLegacyFileStoreAtURL:legacy];
+            if (result.succeeded)
+            {
+                [self removeLegacyFileStoreAtURL:legacy];
+            }
+            else
+            {
+                MXLogErrorDetails(@"[MXSQLiteSessionStore] legacy import failed; preserving MXFileStore", @{@"error": result.error ?: NSNull.null});
+            }
             MXLogDebug(@"[MXSQLiteSessionStore] switched from MXFileStore in %.0f ms: skipped=%d outgoing=%lu drafts=%lu",
                        (CFAbsoluteTimeGetCurrent() - start) * 1000, result.skipped,
                        (unsigned long)result.outgoingCount, (unsigned long)result.draftCount);
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.legacyImportResult = result;
+                if (!result.succeeded)
+                {
+                    [MXSQLiteSessionStore noteOpenFailureForUserId:userId];
+                    if (failure)
+                    {
+                        failure(result.error ?: [NSError errorWithDomain:MXSQLiteErrorDomain code:MXSQLiteErrorOpenFailed
+                                                                  userInfo:@{NSLocalizedDescriptionKey: @"Legacy MXFileStore import failed"}]);
+                    }
+                    return;
+                }
                 if (onComplete)
                 {
                     onComplete();

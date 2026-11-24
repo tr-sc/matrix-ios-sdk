@@ -21,6 +21,9 @@
 
 #import "MXFileRoomStore.h"
 
+/// Current on-disk MXFileStore format version; used by migrations that create compatible store metadata.
+FOUNDATION_EXPORT NSUInteger const MXFileStoreCurrentVersion;
+
 NS_ASSUME_NONNULL_BEGIN
 
 /**
@@ -176,6 +179,10 @@ typedef NS_OPTIONS(NSInteger, MXFileStorePreloadOptions)
  @param enableClearData flag to enable clearing data in case of eventStreamToken is missing.
  */
 - (void)loadMetaData:(BOOL)enableClearData;
+
+/// Mark a local-only rollback export as protected by a committed Sliding Sync checkpoint.
+/// Call only after the sync response has been committed to the store.
+- (void)markLocalDataCheckpointed;
 
 /**
  Get the room store for a given room.

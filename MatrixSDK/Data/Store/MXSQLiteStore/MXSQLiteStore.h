@@ -95,6 +95,9 @@ FOUNDATION_EXPORT NSInteger const MXSQLiteExtensionBusyTimeoutMilliseconds;
 /// Синхронно записать накладку (уход в фон, `close`). С main допустимо: пишет только накопленное.
 - (void)flush;
 
+/// То же, но возвращает результат транзакции. Используется для миграций, где источник нельзя удалять при ошибке.
+- (BOOL)flushWithError:(NSError * _Nullable * _Nullable)error;
+
 /// Накладки всех компонентов — одной транзакцией на очереди писателя; затем `MXStoreDidCommitNotification`.
 - (void)commit;
 /// То же; `completion` — на main.

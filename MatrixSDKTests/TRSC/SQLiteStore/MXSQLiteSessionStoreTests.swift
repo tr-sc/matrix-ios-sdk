@@ -23,6 +23,7 @@ final class MXSQLiteSessionStoreTests: XCTestCase {
 
     override func tearDown() {
         sandbox.remove()
+        try? FileManager.default.removeItem(at: MXSQLiteLegacyImport.fileStoreURL(forUserId: userId))
         super.tearDown()
     }
 
@@ -136,7 +137,7 @@ final class MXSQLiteSessionStoreTests: XCTestCase {
         store.close()
         XCTAssertTrue(MXSQLiteStore.hasDatabase(forUserId: userId, rootDirectory: sandbox.directory))
 
-        MXSQLiteSessionStore.deactivate(for: credentials, rootDirectory: sandbox.directory, keyProvider: sandbox.keys)
+        XCTAssertTrue(MXSQLiteSessionStore.deactivate(for: credentials, rootDirectory: sandbox.directory, keyProvider: sandbox.keys))
 
         XCTAssertFalse(MXSQLiteStore.hasDatabase(forUserId: userId, rootDirectory: sandbox.directory))
         let identifier = MXSQLiteStore.keyIdentifier(forUserId: userId)
